@@ -1026,10 +1026,10 @@ fn xray_shape(dep: &Value, svc: Option<&Value>) -> Value {
             "managedBy": MANAGED_BY,
             "isWasm": true,
             "direction": "ingress",
-            "directionLabel": "入站（REALITY 入 → 直连出）",
+            "directionLabel": "入站（reality 入 → socket 出）",
             "egress": {
-                "via": "直连（该节点自己的网络）",
-                "protocol": "VLESS+REALITY → 直连目标（无第二跳）",
+                "via": "socket（直连，走该节点自己的网络）",
+                "protocol": "VLESS+REALITY → socket 直连目标（无第二跳）",
                 "note": "客户端从公网连进来，出口就是这台节点的网络；未认证流量回落到 dest 站点",
             },
             "ingress": {
@@ -1135,21 +1135,21 @@ pub fn xray_list(req: &Request) -> Response {
         "modes": [
             {
                 "id": "walljump",
-                "label": "翻墙（REALITY 入站 → 直连出）",
+                "label": "翻墙（reality 入站 → socket 出站）",
                 "impl": "xray-wasm（服务端模式 XT_MODE=server）",
                 "runtimeClass": "wasmtime-wasip2",
                 "entry": "NodePort（节点公网 IP:端口）",
-                "who": "你自己：在国内直连这个公网入口，出口走该节点的网络",
+                "who": "你自己：在国内直连这个公网入口，出口走该节点的网络（socket 直连，无第二跳）",
                 "nodeRequirement": "需要装了 wasm 运行时（wasm.sh/wasmtime=true）且建议有公网 IP 的节点",
                 "flowNote": "链接必须不带 flow（服务端未实现 XTLS-Vision 流控）",
             },
             {
                 "id": "tunnel",
-                "label": "隧道（SOCKS5 入站 → REALITY 出）",
+                "label": "隧道（socket 入站 → reality 出站）",
                 "impl": "xray-wasm（客户端模式）",
                 "runtimeClass": "wasmtime-wasip2",
-                "entry": "ClusterIP / NodePort（SOCKS5 代理）",
-                "who": "集群内的 Pod（或外部客户端）：流量经远端 REALITY 出网",
+                "entry": "ClusterIP / NodePort（socket / SOCKS5 代理端口）",
+                "who": "集群内的 Pod（或外部客户端）：从 socket（SOCKS5）进来，经远端 reality 出网",
                 "nodeRequirement": "任意带 wasm 运行时的节点",
                 "flowNote": "上游是 stock Xray 时可用 flow=xtls-rprx-vision；上游若是 xray-wasm 服务端则必须留空",
             },
@@ -1490,7 +1490,7 @@ pub fn xray_create(req: &Request) -> Response {
         "created": true,
         "mode": "tunnel",
         "impl": "xray-wasm（wasm32-wasip2，REALITY 客户端）",
-        "direction": "SOCKS5 入站 → REALITY 出站",
+        "direction": "socket 入站 → reality 出站",
         "namespace": namespace,
         "name": name,
         "secret": secret_name,
@@ -1812,11 +1812,11 @@ fn xray_create_walljump(req: &Request, body: &Value, cfg: &Config, k8s: &K8s) ->
         "publicKey": public_key,
         "vlessLink": link,
         "clientConfig": client_config,
-        "impl": "xray-wasm（wasm32-wasip2，REALITY 服务端模式 XT_MODE=server）",
-        "direction": "REALITY 入站 → 直连出站",
+        "impl": "xray-wasm（wasm32-wasip2，reality 服务端模式 XT_MODE=server）",
+        "direction": "reality 入站 → socket 出站",
         "usage": format!("国内客户端导入上面的 vless 链接即可；入口就是 {entry}（节点 {node} 的公网地址）"),
         "note": format!(
-            "翻墙入口已就绪：{entry}（REALITY 入 → 直连出，出网走节点 {node} 自己的网络）。\
+            "翻墙入口已就绪：{entry}（reality 入 → socket 出，出网走节点 {node} 自己的网络）。\
              ⚠️ 这条链接**故意不带 flow**：xray-wasm 服务端尚未实现 XTLS-Vision 流控，\
              带非空 flow 的客户端会被明确拒绝。未认证的探测者会看到 {dest} 的真实证书（回落行为）。"
         ),

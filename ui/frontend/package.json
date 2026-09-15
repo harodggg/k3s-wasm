@@ -1,7 +1,7 @@
 {
   "name": "k3s-wasm-ui-frontend",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.5.1",
   "type": "module",
   "description": "k3s WASM 控制台前端：无框架、零运行时依赖，构建产物编译期嵌入 wasm 后端",
   "scripts": {

@@ -181,12 +181,12 @@ ssh -N -L 1080:$(kubectl -n xray get svc xray-wasm -o jsonpath='{.spec.clusterIP
 读 Secret 的权限是**命名空间级 Role**（`k3s-wasm-tunnel-secrets`，只 `get`），不是集群级
 `get secrets` —— 后者等于能读全集群密钥。在别的命名空间建隧道时，把这份 Role/RoleBinding 复制过去。
 
-## 8. 两种模式：翻墙 vs 隧道（现在**都是 wasm**）
+## 8. 两种模式：翻墙（reality → socket）vs 隧道（socket → reality）—— 都是 wasm
 
 | 模式 | 入站 | 出站 | 实现 | 链接里的 `flow` |
 |---|---|---|---|---|
-| **翻墙** | **REALITY**（NodePort，pod 内 8443） | **直连**（走所选节点自己的网络） | 同一个 wasm 组件，`XT_MODE=server` | **必须不带** |
-| **隧道** | **SOCKS5**（ClusterIP / NodePort，1080） | **REALITY**（连远端服务端） | 同一个 wasm 组件，默认（客户端） | 上游是 stock Xray 时可带 `xtls-rprx-vision` |
+| **翻墙** | **reality**（NodePort，pod 内 8443） | **socket 直连**（走所选节点自己的网络，无第二跳） | 同一个 wasm 组件，`XT_MODE=server` | **必须不带** |
+| **隧道** | **socket / SOCKS5**（ClusterIP / NodePort，1080） | **reality**（连远端服务端） | 同一个 wasm 组件，默认（客户端） | 上游是 stock Xray 时可带 `xtls-rprx-vision` |
 
 ### 8.1 为什么两者能共用一个模块
 
