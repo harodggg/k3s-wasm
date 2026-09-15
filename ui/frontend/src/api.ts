@@ -279,6 +279,21 @@ export interface ImageList {
   hint: string;
 }
 
+/** 镜像版本 tag（来自 GitHub releases，用于"按版本下拉"） */
+export interface ImageTag {
+  tag: string;
+  name: string;
+  prerelease: boolean;
+  publishedAt: string | null;
+}
+
+export interface ImageTagList {
+  repo: string;
+  tags: ImageTag[];
+  error?: string;
+  hint?: string;
+}
+
 export interface NamespaceInfo {
   name: string;
   phase: string;
@@ -373,6 +388,8 @@ export const api = {
   namespaces: () => request<NamespaceInfo[]>('/api/namespaces'),
   /** wasmOnly=false 时把系统组件镜像也列出来 */
   images: (wasmOnly = true) => request<ImageList>(`/api/images${q({ wasmOnly: wasmOnly ? '1' : '0' })}`),
+  imageTags: (repo = 'harodggg/xray-wasm') =>
+    request<ImageTagList>(`/api/image-tags${q({ repo })}`),
   workloads: (namespace?: string) => request<Workload[]>(`/api/workloads${q({ namespace })}`),
   pods: (namespace?: string, node?: string) => request<PodInfo[]>(`/api/pods${q({ namespace, node })}`),
   events: (namespace?: string) => request<ClusterEvent[]>(`/api/events${q({ namespace })}`),

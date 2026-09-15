@@ -545,6 +545,72 @@ pub fn images(req: &Request) -> Response {
     }))
 }
 
+/// GET /api/image-tags?repo=harodggg/xray-wasm
+///
+/// 从 GitHub releases 取 tag 列表，供镜像**版本**下拉使用（v0.1.0 / v0.2.0 / …）。
+/// 取不到不算错误：返回空列表 + 原因，前端会退回到"集群里在跑的镜像 + 兜底建议"。
+pub fn image_tags(req: &Request) -> Response {
+    let repo = req
+        .query_param("repo")
+        .filter(|r| {
+            !r.is_empty()
+                && r.len() <= 120
+                && r.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+                && r.matches('/').count() == 1
+        })
+        .unwrap_or_else(|| "harodggg/xray-wasm".to_string());
+
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=30");
+    let resp = match crate::k8s::fetch_absolute(&url) {
+        Ok(r) => r,
+        Err(e) => {
+            return Response::ok(json!({
+                "repo": repo,
+                "tags": [],
+                "error": e.message(),
+                "hint": "拉不到 GitHub releases（可能宿主不允许出站 HTTPS，或网络受限）。下拉会自动退回到集群里在跑的镜像与兜底建议。",
+            }))
+        }
+    };
+    if resp.status != 200 {
+        return Response::ok(json!({
+            "repo": repo,
+            "tags": [],
+            "error": format!("GitHub API 返回 {}", resp.status),
+            "hint": "私有仓库需要带 token（当前组件不带凭据）；公开仓库通常是限流。",
+        }));
+    }
+    let releases: Value = match serde_json::from_slice(&resp.body) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response::ok(json!({
+                "repo": repo, "tags": [], "error": format!("解析 GitHub 返回失败：{e}"),
+            }))
+        }
+    };
+    let tags: Vec<Value> = releases
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| {
+            let tag = r["tag_name"].as_str()?;
+            Some(json!({
+                "tag": tag,
+                "name": r["name"].as_str().unwrap_or(tag),
+                "prerelease": r["prerelease"].as_bool().unwrap_or(false),
+                "publishedAt": r["published_at"],
+            }))
+        })
+        .collect();
+
+    Response::ok(json!({
+        "repo": repo,
+        "tags": tags,
+        "hint": "tag 来自 GitHub releases；新发一个 release，下拉里就会多一项。",
+    }))
+}
+
 pub fn events(req: &Request) -> Response {
     let (cfg, k8s) = client();
     let ns = ns_or_default(&cfg, req);

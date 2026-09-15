@@ -200,6 +200,48 @@ impl K8s {
         body: Option<String>,
     ) -> Result<Upstream, ApiError> {
         let (scheme, authority) = split_base(&self.base)?;
+        send_request(scheme, &authority, method, path_and_query, headers, body)
+    }
+}
+
+/// 向**集群外**的绝对 URL 发一个 GET（例如 GitHub API）。
+///
+/// 存在的意义：镜像版本下拉需要"现在有哪些 tag"。CRI 不暴露镜像列表、
+/// k8s API 里也没有，而 GitHub releases 是 tag 的权威来源 ——
+/// 前提是宿主允许 wasm 组件做出站 HTTPS（本仓库在真机上验证过这一点）。
+pub fn fetch_absolute(url: &str) -> Result<Upstream, ApiError> {
+    let (scheme, rest) = if let Some(r) = url.strip_prefix("https://") {
+        (Scheme::Https, r)
+    } else if let Some(r) = url.strip_prefix("http://") {
+        (Scheme::Http, r)
+    } else {
+        return Err(ApiError::Transport(format!("只支持 http/https：{url}")));
+    };
+    let (authority, path) = match rest.split_once('/') {
+        Some((a, p)) => (a.to_string(), format!("/{p}")),
+        None => (rest.to_string(), "/".to_string()),
+    };
+    if authority.is_empty() {
+        return Err(ApiError::Transport(format!("URL 里没有主机名：{url}")));
+    }
+    // ⚠️ 必须带 User-Agent：GitHub API 对没有 UA 的请求直接返回 403。
+    // 实测：节点上 curl（自带 UA）→ 200；组件不带 UA → 403，很容易误判成"限流"或"HTTPS 不通"。
+    let headers = vec![
+        ("user-agent".to_string(), "k3s-wasm-ui/0.1".to_string()),
+        ("accept".to_string(), "application/vnd.github+json".to_string()),
+    ];
+    send_request(scheme, &authority, Method::Get, &path, &headers, None)
+}
+
+fn send_request(
+    scheme: Scheme,
+    authority: &str,
+    method: Method,
+    path_and_query: &str,
+    headers: &[(String, String)],
+    body: Option<String>,
+) -> Result<Upstream, ApiError> {
+    {
 
         // ⚠️ wasi-http 的坑：OutgoingRequest 的 header 必须在**构造时**通过 Fields 传入。
         // 构造之后再拿 req.headers() 去 set 是拿不到的 —— 那是一个只读视图，
@@ -221,7 +263,7 @@ impl K8s {
             .map_err(|_| ApiError::Transport("set_method 失败".into()))?;
         req.set_scheme(Some(&scheme))
             .map_err(|_| ApiError::Transport("set_scheme 失败".into()))?;
-        req.set_authority(Some(&authority))
+        req.set_authority(Some(authority))
             .map_err(|_| ApiError::Transport("set_authority 失败".into()))?;
         req.set_path_with_query(Some(path_and_query))
             .map_err(|_| ApiError::Transport("set_path_with_query 失败".into()))?;

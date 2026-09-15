@@ -194,7 +194,27 @@ ssh -N -L 1080:$(kubectl -n xray get svc xray-wasm -o jsonpath='{.spec.clusterIP
 
 拉不到候选时不影响手输；`defaults` 里也放了两条常见镜像兜底。
 
-## 9. 换到自己的服务端
+## 9. 镜像下拉：按版本 tag 选
+
+「Xray 隧道」表单的镜像字段是一个 `datalist`，候选按三个来源合并、**版本优先**：
+
+| 来源 | 内容 | 为什么可信 |
+|---|---|---|
+| ① `GET /api/image-tags?repo=harodggg/xray-wasm` | `docker.io/k3s-wasm/xray-wasm-cli:v0.3.0 / v0.2.0 / v0.1.0…` | tag 取自 **GitHub releases**，发新版本下拉自动多一项 |
+| ② `GET /api/images?wasmOnly=1` | 集群里正在跑的 wasm 镜像 | 一定已在节点上，选了不会 pull 失败（标「集群已有」） |
+| ③ `defaults` | 兜底两条 | 集群里暂时没有 wasm 工作负载时下拉不为空 |
+
+实测：`tags: ['v0.2.0', 'v0.1.0']`；两个版本的镜像都已导入节点，
+且 **v0.2.0 的模块在 wasmtime shim 下实测可用**（起隧道 → 出网 HTTP 200）。
+
+⚠️ 踩坑记录：**GitHub API 对没有 `User-Agent` 的请求直接返回 403**。
+组件最初不带 UA，表现是"取 tag 失败：GitHub API 返回 403"，很容易误判成限流或 HTTPS 不通；
+节点上 `curl`（自带 UA）就是 200。已在 `k8s::fetch_absolute` 里固定带上 UA 与 `accept` 头。
+
+另外注意：`ghcr.io/harodggg/xray-wasm:<tag>` 是**容器镜像**（里面自带 wasmtime），
+不能配 wasmtime shim 用；shim 需要的是纯 wasm 模块镜像（`docker.io/k3s-wasm/xray-wasm-cli:<tag>`）。
+
+## 10. 换到自己的服务端
 
 ```bash
 kubectl -n xray create secret generic xray-wasm \

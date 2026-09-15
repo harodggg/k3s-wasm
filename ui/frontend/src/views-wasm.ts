@@ -526,6 +526,43 @@ export function xrayView(): ViewInstance {
         }
       }, 'primary');
 
+      // 镜像候选 = ① 版本 tag（GitHub releases：v0.3.0/v0.2.0/v0.1.0…）
+      //            ② 集群里正在跑的 wasm 镜像（一定已在节点上，标"集群已有"）
+      //            ③ 兜底建议
+      // 拉不到任何来源也不影响手输 —— 这里刻意不抛错。
+      try {
+        const [tags, imgs] = await Promise.all([
+          ctx.api.imageTags('harodggg/xray-wasm').catch(() => null),
+          ctx.api.images(true).catch(() => null),
+        ]);
+        const running = new Set((imgs?.items ?? []).map((i) => i.image));
+        const WANT = 'docker.io/k3s-wasm/xray-wasm-cli'; // 纯 wasm 模块镜像，配 wasmtime shim
+        const byTag = (tags?.tags ?? [])
+          .map((t) => t.tag)
+          .filter((t) => t.length > 0)
+          .map((t) => `${WANT}:${t}`);
+        const rest = [...(imgs?.items ?? []).map((i) => i.image), ...(imgs?.defaults ?? [])].filter(
+          (v) => !byTag.includes(v),
+        );
+        const all: string[] = [];
+        const seen = new Set<string>();
+        for (const v of [...byTag, ...rest]) {
+          if (!seen.has(v)) {
+            seen.add(v);
+            all.push(v);
+          }
+        }
+        xrayImageList.replaceChildren(
+          ...all.map((v) => el('option', { attrs: { value: v, ...(running.has(v) ? { label: '集群已有' } : {}) } })),
+        );
+        if (!image.value.trim()) {
+          image.value = byTag.find((v) => running.has(v)) ?? byTag[0] ?? all[0] ?? '';
+        }
+      } catch {
+        /* 候选拉不到就手输 */
+      }
+
+
       host.append(
         el(
           'div',

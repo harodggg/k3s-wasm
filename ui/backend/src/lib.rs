@@ -61,6 +61,7 @@ fn route(req: &Request) -> Response {
         ("GET", ["api", "pods", ns, name, "logs"]) => api::pod_logs(req, ns, name),
         ("GET", ["api", "events"]) => api::events(req),
         ("GET", ["api", "images"]) => api::images(req),
+        ("GET", ["api", "image-tags"]) => api::image_tags(req),
 
         // ── SpinKube ───────────────────────────────────────────────
         ("GET", ["api", "spinapps"]) => api::spinapps_list(req),
