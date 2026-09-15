@@ -472,6 +472,79 @@ pub fn pod_logs(req: &Request, ns: &str, name: &str) -> Response {
     }
 }
 
+/// GET /api/images?wasmOnly=1
+///
+/// 列出集群里**实际在用**的镜像（从 Pod 规格聚合），用作表单下拉的建议值。
+/// 为什么不列 containerd 的完整镜像列表：CRI 没有把这个暴露成 k8s API，
+/// 组件又只能通过 kube-api-proxy 说话；而"已经在跑的镜像"恰好是最有用的那批
+/// —— 它们一定已经被节点拉取/导入过，选它不会遇到 pull 失败。
+pub fn images(req: &Request) -> Response {
+    let (_cfg, k8s) = client();
+    let wasm_only = req.query_param("wasmOnly").as_deref() != Some("0");
+    let pods = match k8s.get("/api/v1/pods?limit=2000") {
+        Ok(v) => v,
+        Err(e) => return from_err(e),
+    };
+
+    // image -> (总次数, wasm 次数, 运行时集合)
+    let mut agg: std::collections::BTreeMap<String, (i64, i64, std::collections::BTreeSet<String>)> =
+        std::collections::BTreeMap::new();
+    for pod in pods["items"].as_array().cloned().unwrap_or_default() {
+        let rc = pod["spec"]["runtimeClassName"].as_str().unwrap_or("");
+        let is_wasm = runtime_is_wasm(rc);
+        // 只看运行中的 Pod：已删除/失败的 Pod 里的镜像可能并不在节点上
+        let phase = pod["status"]["phase"].as_str().unwrap_or("");
+        if phase != "Running" {
+            continue;
+        }
+        for c in pod["spec"]["containers"].as_array().cloned().unwrap_or_default() {
+            if let Some(img) = c["image"].as_str() {
+                if img.is_empty() {
+                    continue;
+                }
+                let e = agg.entry(img.to_string()).or_insert((0, 0, Default::default()));
+                e.0 += 1;
+                if is_wasm {
+                    e.1 += 1;
+                    if !rc.is_empty() {
+                        e.2.insert(rc.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut items: Vec<Value> = agg
+        .into_iter()
+        .filter(|(_, (_, wasm, _))| !wasm_only || *wasm > 0)
+        .map(|(image, (count, wasm, rcs))| {
+            json!({
+                "image": image,
+                "count": count,
+                "wasmCount": wasm,
+                "runtimeClasses": rcs.into_iter().collect::<Vec<_>>(),
+                "isWasm": wasm > 0,
+            })
+        })
+        .collect();
+    // wasm 工作负载用过的排前面，其次按出现次数
+    items.sort_by(|a, b| {
+        let key = |v: &Value| (v["isWasm"].as_bool().unwrap_or(false), v["count"].as_i64().unwrap_or(0));
+        key(b).cmp(&key(a))
+    });
+
+    Response::ok(json!({
+        "wasmOnly": wasm_only,
+        "items": items,
+        // 兜底建议：即使集群里暂时没有这些镜像，也让下拉有东西可选
+        "defaults": [
+            "docker.io/k3s-wasm/xray-wasm-cli:v0.1.0",
+            "ghcr.io/harodggg/xray-wasm:v0.1.0",
+        ],
+        "hint": "列表来自集群里正在运行的 Pod 所用镜像（这些镜像一定已在节点上，选它不会遇到拉取失败）；也可以直接手输别的。",
+    }))
+}
+
 pub fn events(req: &Request) -> Response {
     let (cfg, k8s) = client();
     let ns = ns_or_default(&cfg, req);

@@ -177,7 +177,24 @@ ssh -N -L 1080:$(kubectl -n xray get svc xray-wasm -o jsonpath='{.spec.clusterIP
 读 Secret 的权限是**命名空间级 Role**（`k3s-wasm-tunnel-secrets`，只 `get`），不是集群级
 `get secrets` —— 后者等于能读全集群密钥。在别的命名空间建隧道时，把这份 Role/RoleBinding 复制过去。
 
-## 8. 换到自己的服务端
+## 8. 镜像现在是下拉可选
+
+「Xray 隧道」与「Spin 应用」两个表单的**镜像**字段都改成了「下拉建议 + 可手输」（HTML `datalist`）。
+候选来自 `GET /api/images?wasmOnly=1|0`，即**集群里正在运行的 Pod 所用镜像**：
+
+```
+?wasmOnly=1 → docker.io/k3s-wasm/xray-wasm-cli:v0.1.0  (wasm 次数=6, wasmtime-wasip2)
+              docker.io/k3s-wasm/k3s-wasm-ui:dev        (wasm 次数=2, wasmtime-wasip2)
+?wasmOnly=0 → 再加系统组件镜像（cilium / klipper-lb / hubble-relay …，共 14 个）
+```
+
+为什么用「在跑的镜像」而不是 containerd 的完整镜像列表：CRI 没有把镜像列表暴露成 k8s API，
+组件只能通过 kube-api-proxy 说话；而**已经在跑的镜像一定已被节点拉取或导入**，
+选它不会遇到 `pull access denied`/`ImagePullBackOff` —— 这正是之前踩过的坑。
+
+拉不到候选时不影响手输；`defaults` 里也放了两条常见镜像兜底。
+
+## 9. 换到自己的服务端
 
 ```bash
 kubectl -n xray create secret generic xray-wasm \

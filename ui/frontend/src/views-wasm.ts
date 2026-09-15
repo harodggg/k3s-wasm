@@ -101,6 +101,8 @@ export function spinAppsView(): ViewInstance {
       // 表单字段
       const name = input('hello-spin');
       const image = input('registry.k8s.io/… 或 ghcr.io/…');
+      image.setAttribute('list', 'spin-image-options');
+      const spinImageList = el('datalist', { attrs: { id: 'spin-image-options' } });
       const replicas = input('1', '1', 'number') as HTMLInputElement;
       const variableKey = input('例如 greeting');
       const variableValue = input('例如 hi');
@@ -147,6 +149,20 @@ export function spinAppsView(): ViewInstance {
         }
       }, 'primary');
 
+      // 下拉候选：集群里正在跑的镜像（kubelet 会拉，选本地已存在的镜像最稳）
+      try {
+        const imgs = await ctx.api.images(false);
+        const values = [
+          ...imgs.items.map((i) => i.image),
+          ...imgs.defaults.filter((d) => !imgs.items.some((i) => i.image === d)),
+        ];
+        spinImageList.replaceChildren(
+          ...values.map((v) => el('option', { attrs: { value: v } })),
+        );
+      } catch {
+        /* 拉不到候选不影响手输 */
+      }
+
       host.append(
         el(
           'div',
@@ -157,7 +173,8 @@ export function spinAppsView(): ViewInstance {
               'div',
               { class: 'stack' },
               field('名称', name, 'DNS-1123：小写字母数字和 -'),
-              field('镜像', image, 'kubelet 会去拉这个引用，别写 localhost'),
+              field('镜像', image, '下拉里是集群里正在跑的镜像（选它一定已在节点上）；也可以手输'),
+              spinImageList,
               field('副本数', replicas),
               field('executor', executorSelect, 'SpinApp 的 runtimeClassName 来自 executor，不是自己写'),
               el('div', { class: 'grid-2-tight' }, field('变量名（可选）', variableKey), field('变量值', variableValue)),
@@ -345,6 +362,8 @@ export function xrayView(): ViewInstance {
       const listen = input('0.0.0.0:1080', '0.0.0.0:1080');
       const replicas = input('2', '2', 'number') as HTMLInputElement;
       const image = input('docker.io/k3s-wasm/xray-wasm-cli:v0.1.0');
+      image.setAttribute('list', 'xray-image-options');
+      const xrayImageList = el('datalist', { attrs: { id: 'xray-image-options' } });
 
       // 用途：直接决定 Service 是 ClusterIP 还是 NodePort，以及 NetworkPolicy 是否放行外部来源
       const exposeSel = el('select', { class: 'input' }) as HTMLSelectElement;
@@ -546,7 +565,8 @@ export function xrayView(): ViewInstance {
               el('div', { class: 'grid-2-tight' }, field('已有 Secret（可选）', secretName), field('SOCKS5 监听', listen)),
               field('用途', exposeSel, '入站=外部经节点IP连进来用；出站=集群内 Pod 用它出网。两者可同时具备'),
               el('div', { class: 'grid-2-tight' }, field('NodePort（可选）', nodePortIn), field('放行来源（外部用途时）', allowFromIn)),
-              field('镜像', image),
+              field('镜像', image, '下拉里是集群里正在跑的镜像（含 wasm 工作负载用过的）；也可以手输'),
+              xrayImageList,
               created,
               create,
             ),

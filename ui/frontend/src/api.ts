@@ -263,6 +263,22 @@ export interface XrayList {
   shim: { runtimeClass: string; requiredNodeLabel: string };
 }
 
+/** 集群里正在运行的 Pod 所用镜像（下拉建议的来源） */
+export interface ImageInfo {
+  image: string;
+  count: number;
+  wasmCount: number;
+  runtimeClasses: string[];
+  isWasm: boolean;
+}
+
+export interface ImageList {
+  wasmOnly: boolean;
+  items: ImageInfo[];
+  defaults: string[];
+  hint: string;
+}
+
 export interface NamespaceInfo {
   name: string;
   phase: string;
@@ -355,6 +371,8 @@ export const api = {
   nodes: () => request<NodeInfo[]>('/api/nodes'),
   runtimes: () => request<RuntimeInfo[]>('/api/runtimes'),
   namespaces: () => request<NamespaceInfo[]>('/api/namespaces'),
+  /** wasmOnly=false 时把系统组件镜像也列出来 */
+  images: (wasmOnly = true) => request<ImageList>(`/api/images${q({ wasmOnly: wasmOnly ? '1' : '0' })}`),
   workloads: (namespace?: string) => request<Workload[]>(`/api/workloads${q({ namespace })}`),
   pods: (namespace?: string, node?: string) => request<PodInfo[]>(`/api/pods${q({ namespace, node })}`),
   events: (namespace?: string) => request<ClusterEvent[]>(`/api/events${q({ namespace })}`),
