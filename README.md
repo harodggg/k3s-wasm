@@ -1,5 +1,7 @@
 # k3s-wasm
 
+[![ci](https://github.com/harodggg/k3s-wasm/actions/workflows/ci.yml/badge.svg)](https://github.com/harodggg/k3s-wasm/actions/workflows/ci.yml)
+
 在 **k3s** 上跑 **wasm32-wasip2** 工作负载，外加一个**自己也是 wasm** 的 k3s 控制台。
 
 两件交付物：
