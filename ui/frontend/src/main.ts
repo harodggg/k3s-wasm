@@ -12,6 +12,7 @@ import type { AuthStatus } from './api';
 import { clear, el, errorText, toast } from './dom';
 import type { Ctx, ViewInstance } from './view-types';
 import { eventsView, logsView, nodesView, overviewView, runtimesView, workloadsView } from './views-cluster';
+import { topologyView } from './views-topology';
 import { spinAppsView, xrayView } from './views-wasm';
 import { logout, renderAuthView } from './views-auth';
 import './styles.css';
@@ -27,6 +28,7 @@ const ROUTES: Route[] = [
   { hash: '#/nodes', label: '节点', factory: () => nodesView() },
   { hash: '#/runtimes', label: 'WASM 运行时', factory: () => runtimesView() },
   { hash: '#/workloads', label: '工作负载', factory: () => workloadsView() },
+  { hash: '#/topology', label: '网络拓扑', factory: () => topologyView() },
   { hash: '#/spinapps', label: 'Spin 应用', factory: () => spinAppsView() },
   { hash: '#/xray', label: 'Xray 隧道', factory: () => xrayView() },
   { hash: '#/logs', label: '日志', factory: (p) => logsView(p) },

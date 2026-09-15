@@ -68,7 +68,7 @@ fn ns_or_default(cfg: &Config, req: &Request) -> String {
 // 标签 / 运行时判定
 // ════════════════════════════════════════════════════════════════════
 
-fn label_bool(labels: &Value, key: &str) -> bool {
+pub(crate) fn label_bool(labels: &Value, key: &str) -> bool {
     labels
         .get(key)
         .and_then(Value::as_str)
@@ -76,16 +76,65 @@ fn label_bool(labels: &Value, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 判断一个 Pod 模板是不是 wasm 工作负载。
-/// 依据只有 runtimeClassName —— 靠镜像名猜不可靠。
+/// 运行时**统一三分类**：`wasm` / `gpu` / `native`。
+///
+/// 判据只有 runtimeClassName（或 RuntimeClass 的 handler）—— 靠镜像名猜不可靠：
+/// `containerd-shim-*` 这类镜像名什么都看不出来，而 vm 里跑的普通 Go 二进制
+/// 也可能出现在 wasm 命名空间里。
+///
+/// 整个控制台（概览统计、节点、运行时列表、工作负载、Pod、拓扑）都用这一个函数，
+/// 避免各视图各写一套「什么算 wasm」的判断而慢慢漂移。
+pub fn runtime_category(name_or_handler: &str) -> &'static str {
+    // ⚠️ 这里的名字清单是**实测**出来的：k3s 会自动为它探测到的每个 shim 建一个
+    // RuntimeClass，本集群上真实存在 12 个。只匹配 "wasm"/"spin" 会把
+    // lunatic / slight / wws 这三个货真价实的 WASM 运行时误判成原生 ——
+    // 它们都是 runwasi 系 shim（WASM 运行时），名字里偏偏没有 "wasm"。
+    const WASM_HINTS: [&str; 9] = [
+        "wasm", "spin", "wasi", "lunatic", "wasmedge", "wasmer", "slight", "wws", "wamr",
+    ];
+    let s = name_or_handler.to_ascii_lowercase();
+    if WASM_HINTS.iter().any(|h| s.contains(h)) {
+        "wasm"
+    } else if s.contains("nvidia") || s.contains("gpu") || s.contains("cuda") || s.contains("mig-")
+    {
+        "gpu"
+    } else {
+        // 没写 runtimeClassName 的普通 Pod（空串）也归到这里 —— 那就是 runc 默认路径；
+        // crun / kata / runc 这些容器运行时同理（kata 是 VM 隔离，但不是 wasm 也不是 GPU）。
+        "native"
+    }
+}
+
+/// 判断一个 Pod 模板是不是 wasm 工作负载（三分类的薄封装，保留旧调用点）。
 fn runtime_is_wasm(runtime_class: &str) -> bool {
-    runtime_class.contains("wasm") || runtime_class.contains("spin")
+    runtime_category(runtime_class) == "wasm"
+}
+
+/// 节点是否有 GPU、有几块。
+///
+/// 三个来源都看：device plugin 报的 capacity/allocatable（最可信）、
+/// NVIDIA 的节点标签、以及 PCI 设备标签（没装 device plugin 时也能看出来）。
+pub(crate) fn node_gpu(node: &Value) -> (bool, i64) {
+    let labels = &node["metadata"]["labels"];
+    let cap = &node["status"]["capacity"];
+    let mut count = 0i64;
+    for key in ["nvidia.com/gpu", "amd.com/gpu", "gpu.intel.com/i915"] {
+        if let Some(v) = cap[key].as_str().and_then(|s| s.parse::<i64>().ok()) {
+            count += v;
+        }
+    }
+    let present = count > 0
+        || label_bool(labels, "nvidia.com/gpu.present")
+        || !labels["nvidia.com/gpu.product"].is_null()
+        || label_bool(labels, "feature.node.kubernetes.io/pci-10de.present");
+    (present, count)
 }
 
 fn shape_node(node: &Value) -> Value {
     let meta = &node["metadata"];
     let status = &node["status"];
     let labels = meta["labels"].clone();
+    let (gpu_present, gpu_count) = node_gpu(node);
     let ready = status["conditions"]
         .as_array()
         .map(|cs| {
@@ -112,6 +161,8 @@ fn shape_node(node: &Value) -> Value {
             "spin": label_bool(&labels, "wasm.sh/spin"),
             "wasmtime": label_bool(&labels, "wasm.sh/wasmtime"),
         },
+        // GPU 也放在这里，和 wasm 一样属于「这个节点能跑什么」的运行时能力
+        "gpu": { "present": gpu_present, "count": gpu_count },
         "labels": labels,
     })
 }
@@ -146,6 +197,8 @@ fn shape_pod(pod: &Value) -> Value {
         "image": image,
         "runtimeClass": runtime_class,
         "isWasm": runtime_is_wasm(runtime_class),
+        // 三分类的统一字段（wasm / gpu / native）——前端所有视图都读它
+        "runtimeCategory": runtime_category(runtime_class),
         "startedAt": status["startTime"],
         "createdAt": pod["metadata"]["creationTimestamp"],
         "labels": pod["metadata"]["labels"],
@@ -167,6 +220,7 @@ fn shape_deployment(dep: &Value) -> Value {
         "image": template["containers"].as_array().and_then(|c| c.first()).map(|c| c["image"].clone()).unwrap_or(Value::Null),
         "runtimeClass": runtime_class,
         "isWasm": runtime_is_wasm(runtime_class),
+        "runtimeCategory": runtime_category(runtime_class),
         "labels": dep["metadata"]["labels"],
         "createdAt": dep["metadata"]["creationTimestamp"],
     })
@@ -187,6 +241,7 @@ fn shape_spinapp(app: &Value) -> Value {
         "conditions": app["status"]["conditions"],
         "createdAt": app["metadata"]["creationTimestamp"],
         "isWasm": true,
+        "runtimeCategory": "wasm",
     })
 }
 
@@ -266,10 +321,14 @@ pub fn summary(_req: &Request) -> Response {
             .filter(|p| p["status"]["phase"] == phase)
             .count()
     };
-    let wasm_pods = pod_items
-        .iter()
-        .filter(|p| runtime_is_wasm(p["spec"]["runtimeClassName"].as_str().unwrap_or("")))
-        .count();
+    // 三类 Pod 数：统一走 runtime_category，避免和别的视图口径不一致
+    let category_pods = |cat: &str| {
+        pod_items
+            .iter()
+            .filter(|p| runtime_category(p["spec"]["runtimeClassName"].as_str().unwrap_or("")) == cat)
+            .count()
+    };
+    let wasm_pods = category_pods("wasm");
 
     let runtimes = match runtime_list(&k8s, &node_items) {
         Ok(v) => v,
@@ -300,6 +359,13 @@ pub fn summary(_req: &Request) -> Response {
             "failed": pod_count("Failed"),
             "succeeded": pod_count("Succeeded"),
             "wasm": wasm_pods,
+        },
+        // 运行时三分类（wasm / gpu / native）的 Pod 口径统计
+        "runtimeCategories": {
+            "wasm": wasm_pods,
+            "gpu": category_pods("gpu"),
+            "native": category_pods("native"),
+            "total": pod_items.len(),
         },
         "namespaces": namespaces,
         "runtimes": runtimes,
@@ -334,8 +400,15 @@ fn runtime_list(k8s: &K8s, nodes: &[Value]) -> Result<Value, ApiError> {
         .iter()
         .map(|rc| {
             let handler = rc["handler"].as_str().unwrap_or("");
-            let is_wasm = runtime_is_wasm(handler)
-                || runtime_is_wasm(rc["metadata"]["name"].as_str().unwrap_or(""));
+            let name = rc["metadata"]["name"].as_str().unwrap_or("");
+            // 分类把 handler 和名字一起看：k3s 自动生成的 RuntimeClass 里两者通常一致，
+            // 但自建的（例如 nvidia）可能只在其中一个上体现。
+            let category = if runtime_category(handler) != "native" {
+                runtime_category(handler)
+            } else {
+                runtime_category(name)
+            };
+            let is_wasm = category == "wasm";
             // 契约上 nodeSelector 是个 map：没有 scheduler 时**发 {} 而不是 null**。
             // 事故复盘：早先发 null，前端 Object.entries(null) 抛
             // "Cannot convert undefined or null to object"，而自动刷新每 5 秒把它刷成横幅。
@@ -368,12 +441,16 @@ fn runtime_list(k8s: &K8s, nodes: &[Value]) -> Result<Value, ApiError> {
                 "name": rc["metadata"]["name"],
                 "handler": handler,
                 "isWasm": is_wasm,
+                // 三分类：wasm / gpu / native（前端用同一套徽章与过滤器）
+                "category": category,
                 "nodeSelector": node_selector,
                 // wasm 运行时如果**没有** nodeSelector，就无法从节点标签判断它到底装没装
                 // （k3s 会给 wasmedge/wasmer 这些也建 RuntimeClass，但节点上未必有二进制）。
                 // 这种情况返回 null，让前端显示「无法判定」，而不是编一个数字出来。
                 "capableNodes": if selectorless && is_wasm { Value::Null } else { json!(capable) },
                 "selectorless": selectorless,
+                "mismatch": !selectorless && capable == 0,
+                // 旧字段名保留一版，避免前端/脚本还在读它
                 "misconfigured": !selectorless && capable == 0,
             })
         })
@@ -1738,6 +1815,27 @@ mod tests {
         assert!(!is_dns1123_label("trailing-"));
         assert!(!is_dns1123_label(""));
         assert!(!is_dns1123_label(&"x".repeat(64)));
+    }
+
+    #[test]
+    fn runtime_category_covers_real_cluster_classes() {
+        // 这 12 个名字取自真机 `kubectl get runtimeclasses`（k3s 自动探测出来的
+        // 每个 shim 一个）。特别钉住 lunatic / slight / wws：它们名字里没有 "wasm"，
+        // 但都是 runwasi 系的 WASM 运行时 —— 早先被误判成 native。
+        for wasm in [
+            "spin", "wasmtime", "wasmtime-spin-v2", "wasmtime-wasip2", "wasmedge", "wasmer",
+            "lunatic", "slight", "wws",
+        ] {
+            assert_eq!(runtime_category(wasm), "wasm", "{wasm} 应归 wasm");
+        }
+        for gpu in ["nvidia", "nvidia-experimental", "amd.com/gpu", "nvidia-container-runtime"] {
+            assert_eq!(runtime_category(gpu), "gpu", "{gpu} 应归 gpu");
+        }
+        for native in ["crun", "runc", "kata", ""] {
+            assert_eq!(runtime_category(native), "native", "{native:?} 应归 native");
+        }
+        // handler 与名字都要能被识别（k3s 的 handler 就是 shim 名）
+        assert_eq!(runtime_category("containerd-shim-spin-v2"), "wasm");
     }
 
     #[test]

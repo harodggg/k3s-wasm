@@ -75,10 +75,20 @@ export interface ClusterConfig {
   defaultNamespace: string;
 }
 
+/** Pod/工作负载的运行时类别计数（/api/summary 的 runtimeCategories） */
+export interface RuntimeCategoryCounts {
+  wasm: number;
+  native: number;
+  gpu: number;
+  total: number;
+}
+
 export interface Summary {
   version: { gitVersion?: string; platform?: string } | null;
   nodes: { total: number; ready: number; wasmCapable: number };
   pods: { total: number; running: number; pending: number; failed: number; succeeded: number; wasm: number };
+  /** 对 summary 已经检查过的 Pod 按运行时类别计数 */
+  runtimeCategories?: RuntimeCategoryCounts;
   namespaces: number;
   runtimes: RuntimeInfo[];
   spinapps: { installed: boolean | null; count: number; error?: string };
@@ -96,12 +106,16 @@ export interface NodeInfo {
   runtime: string;
   capacity: { cpu: string; memory: string; pods: string };
   wasm: { spin: boolean; wasmtime: boolean };
+  /** GPU 存在性：由节点标签/容量推导（present=false 时 count 恒为 0） */
+  gpu?: { present: boolean; count: number };
   labels: Record<string, string>;
 }
 
 export interface RuntimeInfo {
   name: string;
   handler: string;
+  /** 运行时类别：wasm | native | gpu */
+  category?: string;
   isWasm: boolean;
   /** 永远是对象（后端保证不发 null）；空对象表示没有 selector */
   nodeSelector: Record<string, string>;
@@ -120,6 +134,8 @@ export interface Workload {
   availableReplicas: number;
   image: string | null;
   runtimeClass: string;
+  /** 运行时类别：wasm | native | gpu */
+  runtimeCategory?: string;
   isWasm: boolean;
   createdAt: string;
 }
@@ -134,6 +150,8 @@ export interface PodInfo {
   restarts: number;
   image: string | null;
   runtimeClass: string;
+  /** 运行时类别：wasm | native | gpu */
+  runtimeCategory?: string;
   isWasm: boolean;
   startedAt: string | null;
   createdAt: string;
@@ -307,6 +325,72 @@ export interface ClusterEvent {
   message: string;
   count: number;
   lastSeen: string;
+}
+
+// ── 网络拓扑（GET /api/topology） ────────────────────────────────────
+//
+// 一次请求返回整张图。`revision` 是内容指纹：节点/边集合没变时它就不变，
+// 前端据此跳过重渲染（拓扑重排一次代价不低，而且会让正在看的人眼花）。
+
+/** 拓扑节点的 kind（后端 group 字段与之一致，个别地方沿用后端命名） */
+export type TopologyKind =
+  | 'node'
+  | 'namespace'
+  | 'workload'
+  | 'service'
+  | 'ingress'
+  | 'networkPolicy'
+  | 'pod';
+
+export interface TopologyScope {
+  namespace: string;
+  includePods: boolean;
+  /** true = 后端对 Pod 数量做了上限截断，前端要提示「部分 Pod 未显示」 */
+  truncated: boolean;
+}
+
+export interface TopologyCounts {
+  nodes: number;
+  namespaces: number;
+  workloads: number;
+  services: number;
+  ingresses: number;
+  networkPolicies: number;
+  pods: number;
+  wasm: number;
+  native: number;
+  gpu: number;
+}
+
+/** meta 的键随 kind 不同而不同，一律按未知值处理，取值要防御性 */
+export interface TopologyNode {
+  id: string;
+  kind: string;
+  label: string;
+  sublabel: string;
+  group: string;
+  /** wasm | native | gpu */
+  category: string;
+  meta: Record<string, unknown>;
+}
+
+export interface TopologyEdge {
+  from: string;
+  to: string;
+  kind: string;
+  count: number;
+}
+
+export interface TopologyGraph {
+  /** 后端时间（秒） */
+  generatedAt: number;
+  revision: string;
+  scope: TopologyScope;
+  /** 可选资源（Service/Ingress/NetworkPolicy/Namespace）读不到时的原因，要显示出来 */
+  notes?: string[];
+  counts: TopologyCounts;
+  nodes: TopologyNode[];
+  edges: TopologyEdge[];
 }
 
 export interface LogResult {
@@ -503,6 +587,9 @@ export const api = {
   workloads: (namespace?: string) => request<Workload[]>(`/api/workloads${q({ namespace })}`),
   pods: (namespace?: string, node?: string) => request<PodInfo[]>(`/api/pods${q({ namespace, node })}`),
   events: (namespace?: string) => request<ClusterEvent[]>(`/api/events${q({ namespace })}`),
+  /** 整张网络拓扑图；pods=true 时后端额外下发 Pod 节点（可能被截断，看 scope.truncated） */
+  topology: (namespace?: string, pods = false) =>
+    request<TopologyGraph>(`/api/topology${q({ namespace, pods: pods ? '1' : '0' })}`),
   logs: (ns: string, name: string, tail = 200) =>
     request<LogResult>(`/api/pods/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/logs${q({ tail: String(tail) })}`),
 

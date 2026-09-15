@@ -63,6 +63,12 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # 网络拓扑要画 Ingress → Service 的边，所以需要只读 Ingress。
+  # 没有这条也能跑：`/api/topology` 把 Ingress 当**可选**资源，读不到就把原因写进
+  # 响应的 notes（前端会显示），图里少一列但不会整体失败。
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
   # RuntimeClass 列表（控制台要显示哪些 wasm 运行时可用）
   - apiGroups: ["node.k8s.io"]
     resources: ["runtimeclasses"]

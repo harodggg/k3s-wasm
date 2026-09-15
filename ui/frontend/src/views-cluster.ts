@@ -2,7 +2,7 @@
 //
 // 这些都是只读的，所以 autoRefresh = true，轮询时整体重渲染没问题。
 
-import type { ClusterEvent, PodInfo, RuntimeInfo, Summary, Workload } from './api';
+import type { ClusterEvent, PodInfo, RuntimeCategoryCounts, RuntimeInfo, Summary, Workload } from './api';
 import {
   age,
   badge,
@@ -18,7 +18,26 @@ import {
   table,
   toast,
 } from './dom';
+import {
+  CATEGORY_LABEL,
+  CATEGORY_ORDER,
+  categoryBadge,
+  categoryCountsText,
+  categoryFilterSelect,
+  categoryLabel,
+  categoryRank,
+  matchCategory,
+  normalizeCategory,
+} from './runtime-ui';
+import type { CategoryFilter } from './runtime-ui';
 import type { Ctx, ViewInstance } from './view-types';
+
+/** 按类别统计一组 RuntimeClass（概览页的「运行时类别」摘要用） */
+function runtimeCounts(runtimes: RuntimeInfo[]): RuntimeCategoryCounts {
+  const c: RuntimeCategoryCounts = { wasm: 0, native: 0, gpu: 0, total: runtimes.length };
+  for (const r of runtimes) c[normalizeCategory(r.category, r.isWasm)]++;
+  return c;
+}
 
 // ── 概览 ────────────────────────────────────────────────────────────
 
@@ -41,9 +60,15 @@ export function overviewView(): ViewInstance {
         'div',
         { class: 'stats' },
         stat('节点', `${s.nodes.ready}/${s.nodes.total}`, `具备 wasm 运行时：${s.nodes.wasmCapable}`, s.nodes.ready === s.nodes.total ? 'ok' : 'warn'),
-        stat('Pod', `${s.pods.running}/${s.pods.total}`, `其中 wasm 工作负载：${s.pods.wasm}`, 'info'),
+        stat(
+          'Pod',
+          `${s.pods.running}/${s.pods.total}`,
+          s.runtimeCategories ? categoryCountsText(s.runtimeCategories) : `其中 wasm 工作负载：${s.pods.wasm}`,
+          'info',
+        ),
         stat('命名空间', s.namespaces, undefined, 'muted'),
-        stat('WASM 运行时', s.runtimes.filter((r) => r.isWasm).length, `SpinApp：${s.spinapps.installed === false ? '未安装 CRD' : s.spinapps.count}`, 'info'),
+        stat('运行时类别', s.runtimes.length, categoryCountsText(runtimeCounts(s.runtimes)), 'info'),
+        stat('SpinApp', s.spinapps.installed === false ? '未安装 CRD' : s.spinapps.count, undefined, 'muted'),
       ),
     );
 
@@ -58,13 +83,20 @@ export function overviewView(): ViewInstance {
         ),
       );
     }
-    const broken = s.runtimes.filter((r) => r.isWasm && r.misconfigured);
+    // 「RuntimeClass 存在但没有节点装了对应 shim」对三个类别都成立，不再只盯 wasm：
+    // GPU RuntimeClass 选不中带 nvidia.com/gpu 的节点，是同一类排障问题。
+    const broken = s.runtimes.filter((r) => r.misconfigured);
     if (broken.length > 0) {
+      const cats = new Set(broken.map((r) => normalizeCategory(r.category, r.isWasm)));
+      const reasons: string[] = [];
+      if (cats.has('wasm')) reasons.push('wasm：只在一部分节点装了 shim，却忘了给节点打标签（scripts/install-wasm-runtime.sh 会一并处理）');
+      if (cats.has('gpu')) reasons.push('GPU：节点没有 nvidia.com/gpu 标签 / device plugin，或 RuntimeClass 的 nodeSelector 选不中它');
+      if (cats.has('native')) reasons.push('原生：RuntimeClass 的 nodeSelector 与实际节点标签不一致');
       warnings.push(
         hintBox(
           'warn',
           `RuntimeClass ${broken.map((r) => r.name).join('、')} 存在，但没有节点满足它的 nodeSelector`,
-          '通常意味着：只在一部分节点装了 shim，却忘了给节点打标签；或标签与 RuntimeClass.scheduling 不一致。',
+          `通常意味着：${reasons.join('；')}。`,
         ),
       );
     }
@@ -109,13 +141,17 @@ export function overviewView(): ViewInstance {
           s.runtimes.length === 0
             ? empty('没有 RuntimeClass', '先跑 scripts/install-wasm-runtime.sh')
             : table(
-                ['名称', 'handler', '可调度节点', '状态'],
-                s.runtimes.map((r: RuntimeInfo) => [
-                  r.name,
-                  r.handler,
-                  String(r.capableNodes),
-                  r.misconfigured ? badge('无可用节点', 'err') : r.isWasm ? badge('wasm', 'ok') : badge('普通容器', 'muted'),
-                ]),
+                ['名称', '类别', 'handler', '可调度节点', '状态'],
+                s.runtimes
+                  .slice()
+                  .sort((a, b) => categoryRank(a.category, a.isWasm) - categoryRank(b.category, b.isWasm))
+                  .map((r: RuntimeInfo) => [
+                    r.name,
+                    categoryBadge(r.category, r.isWasm),
+                    r.handler,
+                    String(r.capableNodes),
+                    r.misconfigured ? badge('无可用节点', 'err') : badge('可调度', 'ok'),
+                  ]),
               ),
         ),
       ),
@@ -163,7 +199,7 @@ export function nodesView(): ViewInstance {
     }
     host.append(
       table(
-        ['名称', '状态', '架构 / kubelet', '容器运行时', 'wasm 能力', '可调度', 'CPU / 内存'],
+        ['名称', '状态', '架构 / kubelet', '容器运行时', '运行时类别', 'GPU 能力', '可调度', 'CPU / 内存'],
         nodes.map((n) => [
           el('span', { class: 'mono', text: n.name }),
           n.ready ? badge('Ready', 'ok') : badge('NotReady', 'err'),
@@ -172,10 +208,15 @@ export function nodesView(): ViewInstance {
           el(
             'span',
             { class: 'badges' },
-            n.wasm.spin ? badge('spin', 'ok') : null,
-            n.wasm.wasmtime ? badge('wasmtime', 'ok') : null,
+            n.wasm.spin || n.wasm.wasmtime ? categoryBadge('wasm') : null,
+            n.wasm.spin ? badge('spin', 'muted') : null,
+            n.wasm.wasmtime ? badge('wasmtime', 'muted') : null,
             !n.wasm.spin && !n.wasm.wasmtime ? badge('无', 'muted') : null,
           ),
+          // GPU 存在性来自节点标签/容量（后端推导），present=false 时 count 必为 0
+          n.gpu?.present
+            ? el('span', { class: 'badges' }, categoryBadge('gpu'), badge(`×${n.gpu.count}`, 'muted'))
+            : badge('无', 'muted'),
           n.unschedulable ? badge('已封锁', 'warn') : badge('正常', 'muted'),
           `${n.capacity.cpu} / ${n.capacity.memory}`,
         ]),
@@ -200,43 +241,93 @@ export function nodesView(): ViewInstance {
 export function runtimesView(): ViewInstance {
   let host: HTMLElement | null = null;
   let ctx: Ctx;
+  let filter: CategoryFilter = 'all';
 
   const reload = async () => {
     if (!host) return;
     const rs = await ctx.api.runtimes();
+    render(rs);
+  };
+
+  function render(rs: RuntimeInfo[]) {
+    if (!host) return;
     clear(host);
 
     host.append(
       hintBox(
         'info',
-        '两个运行时的分工',
-        'wasmtime-spin-v2（handler spin）跑 Spin 应用 / SpinKube 的 SpinApp；wasmtime-wasip2（handler wasmtime）跑标准 wasi:http/proxy 组件与命令式 wasm（含本控制台自身）。',
+        '三个运行时类别',
+        'WASM：wasmtime-spin-v2（handler spin）跑 Spin 应用，wasmtime-wasip2（handler wasmtime）跑标准 wasi:http/proxy 组件；' +
+          '原生：默认 runc 容器；GPU：需要节点装好 GPU 设备插件、RuntimeClass 的 nodeSelector 选得中它。',
       ),
     );
+
+    // 配置问题独立于类别：任何「有 RuntimeClass 但没有可用节点」都要显式提示
+    const broken = rs.filter((r) => r.misconfigured);
+    if (broken.length > 0) {
+      const cats = new Set(broken.map((r) => normalizeCategory(r.category, r.isWasm)));
+      const reasons: string[] = [];
+      if (cats.has('wasm')) reasons.push('wasm：只在一部分节点装了 shim，漏打节点标签');
+      if (cats.has('gpu')) reasons.push('GPU：节点没有 nvidia.com/gpu 标签 / device plugin，或 nodeSelector 选不中');
+      if (cats.has('native')) reasons.push('原生：RuntimeClass 的 nodeSelector 与实际节点标签不一致');
+      host.append(
+        hintBox(
+          'warn',
+          `RuntimeClass ${broken.map((r) => r.name).join('、')} 存在，但没有节点满足它的 nodeSelector`,
+          `通常意味着：${reasons.join('；')}。`,
+        ),
+      );
+    }
 
     if (rs.length === 0) {
       host.append(empty('集群里没有 RuntimeClass', '在有 shim 的节点上执行 scripts/install-wasm-runtime.sh'));
       return;
     }
 
+    const select = categoryFilterSelect(filter, (v) => {
+      filter = v;
+      render(rs);
+    });
     host.append(
-      table(
-        ['名称', 'handler', 'nodeSelector', '可调度节点', '类型'],
-        rs.map((r) => [
-          el('span', { class: 'mono', text: r.name }),
-          el('span', { class: 'mono', text: r.handler }),
-          // 不要在这里直接 Object.entries：nodeSelector 可能是 null/空
-          el('span', { class: 'mono', text: pairsText(r.nodeSelector, '（无 → 无法判定节点）') }),
-          r.capableNodes === null
-            ? badge('无法判定', 'muted')
-            : r.misconfigured
-              ? el('span', {}, badge('0', 'err'), el('span', { class: 'muted', text: ' 没有节点装了对应 shim' }))
-              : badge(String(r.capableNodes), 'ok'),
-          r.isWasm ? badge('wasm', 'ok') : badge('普通容器', 'muted'),
-        ]),
+      el(
+        'div',
+        { class: 'toolbar' },
+        el('label', { class: 'inline-field' }, el('span', { text: '类别' }), select),
+        el('span', { class: 'muted', text: categoryCountsText(runtimeCounts(rs)) }),
       ),
     );
-  };
+
+    // 按类别分组展示，而不是只分「wasm / 非 wasm」—— GPU 与原生各有各的排障方式
+    const groups = CATEGORY_ORDER.map((c) => ({
+      c,
+      items: rs.filter((r) => normalizeCategory(r.category, r.isWasm) === c),
+    })).filter((g) => g.items.length > 0 && (filter === 'all' || filter === g.c));
+
+    if (groups.length === 0) {
+      host.append(empty(`没有「${categoryLabel(filter)}」类别的 RuntimeClass`));
+      return;
+    }
+
+    for (const g of groups) {
+      host.append(el('h3', { class: 'section-title', text: `${CATEGORY_LABEL[g.c]}（${g.items.length}）` }));
+      host.append(
+        table(
+          ['名称', 'handler', 'nodeSelector', '可调度节点'],
+          g.items.map((r) => [
+            el('span', { class: 'mono', text: r.name }),
+            el('span', { class: 'mono', text: r.handler }),
+            // 不要在这里直接 Object.entries：nodeSelector 可能是 null/空
+            el('span', { class: 'mono', text: pairsText(r.nodeSelector, '（无 → 无法判定节点）') }),
+            r.capableNodes === null
+              ? badge('无法判定', 'muted')
+              : r.misconfigured
+                ? el('span', {}, badge('0', 'err'), el('span', { class: 'muted', text: ' 没有节点装了对应 shim' }))
+                : badge(String(r.capableNodes), 'ok'),
+          ]),
+        ),
+      );
+    }
+  }
 
   return {
     title: 'WASM 运行时',
@@ -255,12 +346,19 @@ export function runtimesView(): ViewInstance {
 export function workloadsView(): ViewInstance {
   let host: HTMLElement | null = null;
   let ctx: Ctx;
-  let wasmOnly = false;
+  // 默认看全部（和旧版「只看 WASM」关闭时的默认一致），避免打开页面就少一半数据
+  let filter: CategoryFilter = 'all';
 
   const reload = async () => {
     if (!host) return;
     const items = await ctx.api.workloads(ctx.currentNamespace);
-    const shown: Workload[] = wasmOnly ? items.filter((i) => i.isWasm) : items;
+    const shown: Workload[] = items
+      .filter((i) => matchCategory(filter, i.runtimeCategory, i.isWasm))
+      .sort(
+        (a, b) =>
+          categoryRank(a.runtimeCategory, a.isWasm) - categoryRank(b.runtimeCategory, b.isWasm) ||
+          (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+      );
     list.replaceChildren(renderList(shown, items.length));
   };
 
@@ -269,7 +367,10 @@ export function workloadsView(): ViewInstance {
       return empty(`命名空间 ${ctx.currentNamespace} 下没有 Deployment`);
     }
     if (shown.length === 0) {
-      return empty(`有 ${total} 个 Deployment，但没有一个是 wasm 工作负载`, '判定依据是 Pod 模板里的 runtimeClassName');
+      return empty(
+        `有 ${total} 个 Deployment，但没有「${categoryLabel(filter)}」类别的`,
+        '判定依据是 Pod 模板里的 RuntimeClassName',
+      );
     }
     return table(
       ['名称', '命名空间', '副本', '镜像', '运行时', '创建'],
@@ -280,7 +381,12 @@ export function workloadsView(): ViewInstance {
           ? badge('0（已停）', 'warn')
           : `${w.readyReplicas}/${w.replicas}`,
         el('span', { class: 'mono truncate', text: w.image ?? '-', title: w.image ?? '' }),
-        w.isWasm ? badge(w.runtimeClass || 'wasm', 'ok') : badge(w.runtimeClass || 'runc', 'muted'),
+        el(
+          'span',
+          { class: 'badges' },
+          categoryBadge(w.runtimeCategory, w.isWasm),
+          el('span', { class: 'mono muted', text: w.runtimeClass || (w.isWasm ? 'wasm' : 'runc') }),
+        ),
         age(w.createdAt),
       ]),
     );
@@ -308,10 +414,9 @@ export function workloadsView(): ViewInstance {
         void reload();
       });
 
-      const wasmToggle = input('', '', 'checkbox') as HTMLInputElement;
-      wasmToggle.checked = wasmOnly;
-      wasmToggle.addEventListener('change', () => {
-        wasmOnly = wasmToggle.checked;
+      // 三分类过滤器：取代旧的「只看 WASM」二选一（GPU/原生 也需要单独看）
+      const catSelect = categoryFilterSelect(filter, (v) => {
+        filter = v;
         void reload();
       });
 
@@ -320,7 +425,7 @@ export function workloadsView(): ViewInstance {
           'div',
           { class: 'toolbar' },
           el('label', { class: 'inline-field' }, el('span', { text: '命名空间' }), nsSelect),
-          el('label', { class: 'checkbox' }, wasmToggle, el('span', { text: '只看 WASM' })),
+          el('label', { class: 'inline-field' }, el('span', { text: '运行时类别' }), catSelect),
         ),
         list,
       );
@@ -376,7 +481,7 @@ export function logsView(params: URLSearchParams): ViewInstance {
     for (const p of pods) {
       const value = `${p.namespace}/${p.name}`;
       const opt = el('option', {
-        text: `${p.name}${p.isWasm ? ' · wasm' : ''} · ${p.phase}${p.restarts > 0 ? ` · 重启${p.restarts}` : ''}`,
+        text: `${p.name} · ${categoryLabel(p.runtimeCategory, p.isWasm)} · ${p.phase}${p.restarts > 0 ? ` · 重启${p.restarts}` : ''}`,
       }) as HTMLOptionElement;
       opt.value = value;
       select.append(opt);

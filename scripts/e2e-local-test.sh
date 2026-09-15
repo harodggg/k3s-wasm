@@ -180,6 +180,18 @@ else
     bad_case "匿名访问 /api/nodes 应为 401" "拿到 HTTP ${ANON_CODE}"
 fi
 check_json "带会话 cookie 访问 /api/nodes → 200" /api/nodes '.ok==true'
+check_json "summary 给出运行时三分类统计（wasm/gpu/native）" /api/summary \
+    '.data.runtimeCategories.wasm>=1 and .data.runtimeCategories.total>=1 and (.data.runtimeCategories|has("gpu"))'
+check_json "runtimes 每项都带 category，且有 wasm 分类" /api/runtimes \
+    '(.data|length)>0 and ([.data[]|select(.category=="wasm")]|length)>=1'
+check_json "pods 每项都带 runtimeCategory" /api/pods \
+    '(.data|length)>0 and ([.data[]|select(.runtimeCategory=="wasm")]|length)>=1'
+check_json "topology 返回节点+边+指纹+三分类计数" /api/topology \
+    '(.data.nodes|length)>0 and (.data.revision|type)=="string" and (.data.counts.wasm>=1) and (.data.scope.namespace|length)>0 and (.data.notes|type)=="array"'
+check_json "topology?pods=1 会多出 Pod 节点与 belongs-to 边" "/api/topology?pods=1" \
+    '([.data.nodes[]|select(.kind=="pod")]|length)>=1 and ([.data.edges[]|select(.kind=="belongs-to")]|length)>=1'
+check_json "topology 无 Service 权限时会记 notes 而不是整体失败" /api/topology \
+    '(.data.notes|length)>=1 and (.data.counts.workloads>=1)'
 AUTH_STATUS="$(curl -sS -m 10 "$BASE/api/auth/status")"
 if printf '%s' "$AUTH_STATUS" | jq_ok - '.data.configured==true and .data.authenticated==false and .data.registered==false'; then
     ok_case "/api/auth/status 匿名可读：已配置/未登录/未绑定"

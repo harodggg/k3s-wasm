@@ -30,7 +30,7 @@ spec:
       serviceAccountName: k3s-wasm-ui
       containers:
         - name: ui
-          image: docker.io/k3s-wasm/k3s-wasm-ui:v0.3.0
+          image: docker.io/k3s-wasm/k3s-wasm-ui:v0.4.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

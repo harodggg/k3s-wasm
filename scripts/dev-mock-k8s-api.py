@@ -79,7 +79,11 @@ NS = ["k3s-wasm", "default", "kube-system"]
 PODS = [
     {
         "metadata": {"name": "k3s-wasm-ui-7d9f8b6c5-abcde", "namespace": "k3s-wasm",
-                     "creationTimestamp": "2026-09-15T01:00:00Z", "labels": {"app.kubernetes.io/name": "k3s-wasm-ui"}},
+                     "creationTimestamp": "2026-09-15T01:00:00Z", "labels": {"app.kubernetes.io/name": "k3s-wasm-ui"},
+                     # 真实集群里 ReplicaSet 一定会写 ownerReferences；拓扑靠它把 Pod
+                     # 归到 Deployment（belongs-to 边），mock 里漏了会少一整类边
+                     "ownerReferences": [{"apiVersion": "apps/v1", "kind": "ReplicaSet",
+                                          "name": "k3s-wasm-ui-7d9f8b6c5", "controller": True}]},
         "spec": {"nodeName": "k3s-node-1", "runtimeClassName": "wasmtime-spin-v2",
                  "containers": [{"name": "ui", "image": "k3s-wasm/k3s-wasm-ui:dev"}]},
         "status": {"phase": "Running", "podIP": "10.42.0.7", "startTime": "2026-09-15T01:00:05Z",
@@ -87,7 +91,9 @@ PODS = [
     },
     {
         "metadata": {"name": "spin-hello-6b7c8d9e0-fghij", "namespace": "k3s-wasm",
-                     "creationTimestamp": "2026-09-15T02:00:00Z"},
+                     "creationTimestamp": "2026-09-15T02:00:00Z",
+                     "ownerReferences": [{"apiVersion": "apps/v1", "kind": "ReplicaSet",
+                                          "name": "spin-hello-6b7c8d9e0", "controller": True}]},
         "spec": {"nodeName": "k3s-node-1", "runtimeClassName": "wasmtime-spin-v2",
                  "containers": [{"name": "spin", "image": "ghcr.io/example/spin-hello:0.1.0"}]},
         "status": {"phase": "Running", "podIP": "10.42.0.9", "startTime": "2026-09-15T02:00:04Z",

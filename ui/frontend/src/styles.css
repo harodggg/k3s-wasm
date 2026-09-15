@@ -205,3 +205,63 @@ textarea.input {
   white-space: pre;
 }
 ul.notes { margin: 0; padding-left: 18px; color: var(--fg-dim); font-size: 12.5px; display: grid; gap: 4px; }
+
+/* 运行时类别分组标题（WASM 运行时页） */
+.section-title { margin: 8px 0 0; font-size: 12.5px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: .05em; }
+
+/* ── 网络拓扑 ───────────────────────────────────────────── */
+.topo-toolbar { row-gap: 10px; }
+.topo-legend { margin-left: auto; }
+.topo-live { display: inline-flex; align-items: center; gap: 8px; }
+.topo-scope { display: flex; flex-direction: column; gap: 8px; }
+.topo-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; align-items: start; }
+@media (max-width: 1080px) { .topo-wrap { grid-template-columns: 1fr; } }
+
+/* 宽/高都可能超出视口：交给画布滚动，而不是把 SVG 压扁 */
+.topo-canvas { background: var(--bg-card); border: 1px solid var(--line); border-radius: 12px; overflow: auto; max-height: 74vh; }
+.topo-svg { display: block; min-width: 100%; }
+.topo-note { padding: 18px; }
+.topo-note .empty { border: none; }
+.topo-header { fill: var(--fg-dim); font-size: 11.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+
+/* 位置过渡：重排时看到的是移动，不是闪现 */
+.topo-node { cursor: pointer; transition: transform .55s cubic-bezier(.22, .61, .36, 1); }
+.topo-box { fill: #1a2348; stroke: var(--line); stroke-width: 1.5; }
+.topo-node.kind-namespace .topo-box,
+.topo-node.kind-networkPolicy .topo-box { fill: #141b38; stroke-dasharray: 5 4; }
+.topo-node.kind-node .topo-box { fill: #16203f; }
+.topo-node:hover .topo-box { stroke: var(--accent); }
+.topo-node.selected .topo-box { stroke: var(--accent); stroke-width: 2.5; }
+.topo-label { fill: var(--fg); font-size: 12.5px; font-weight: 600; }
+.topo-sublabel { fill: var(--fg-dim); font-size: 11px; }
+.topo-cat { font-size: 10.5px; font-weight: 700; letter-spacing: .05em; }
+.topo-cat.cat-wasm { fill: var(--ok); }
+.topo-cat.cat-native { fill: var(--fg-dim); }
+.topo-cat.cat-gpu { fill: var(--accent); }
+
+.topo-edge { fill: none; stroke: #3d4a7d; stroke-width: 1.4; transition: d .55s cubic-bezier(.22, .61, .36, 1), stroke .4s, opacity .4s; }
+.topo-edge.kind-routes { stroke: #4f6aa8; }
+.topo-edge.kind-in,
+.topo-edge.kind-allows { stroke-dasharray: 4 4; }
+.topo-arrow-head { fill: #3d4a7d; }
+.topo-edge-label { fill: var(--fg-dim); font-size: 10.5px; font-family: var(--mono); }
+
+/* 变化高亮：新增绿、消失红幽灵、计数变化脉冲 */
+.topo-node.added .topo-box,
+.topo-edge.added { animation: topo-added 2.6s ease-out; }
+.topo-node.ghost { opacity: .5; }
+.topo-node.ghost .topo-box { stroke: var(--err); stroke-dasharray: 5 4; }
+.topo-edge.ghost { stroke: var(--err); opacity: .5; stroke-dasharray: 3 4; }
+.topo-node.pulse .topo-box { animation: topo-pulse 1.6s ease-out 2; }
+@keyframes topo-added {
+  0% { stroke: var(--ok); stroke-width: 3; }
+  100% { stroke-width: 1.5; }
+}
+@keyframes topo-pulse {
+  0%, 100% { stroke: var(--line); }
+  50% { stroke: var(--warn); stroke-width: 3; }
+}
+
+.topo-details { background: var(--bg-card); border: 1px solid var(--line); border-radius: 12px; padding: 13px 14px; min-height: 120px; }
+.topo-details-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.topo-details-empty { padding: 10px 0; }

@@ -106,6 +106,12 @@ make e2e                          # 31 项端到端断言（真实 wasm 宿主�
 - **Spin 应用**：创建 / 扩缩 / 删除 SpinApp（含 executor 选择，因为 runtimeClassName 来自 executor）
 - **Xray 隧道**：把 `xray-wasm` 作为 wasm 工作负载下发（Secret + Deployment + ClusterIP Service + NetworkPolicy）；
   列表区分**出站**（集群内 → 经 REALITY 出网）与**入站暴露面**（ClusterIP=仅集群内 / NodePort=公网可达，会标红）
+- **网络拓扑**：把 Ingress → Service → 工作负载 → 节点 与 NetworkPolicy 画成一张图，
+  5 秒实时刷新、位置变化有过渡动画、新增/消失的节点会高亮；可只看某个命名空间、
+  按运行时类别过滤、按需展开 Pod 节点。读图规则与「它刻意不做什么」见 `docs/07-topology.md`
+- **运行时三分类**：全控制台统一按 **WASM / 原生 / GPU** 分类（判据只有
+  `runtimeClassName`，不猜镜像名）——概览统计、节点能力（含 GPU 数量）、运行时列表、
+  工作负载、Pod 与拓扑都用同一套字段与徽章
 - **日志 / 事件**：Pod 日志跟随刷新、命名空间事件（排障用）
 
 ### 登录：免密 Touch ID / passkey（WebAuthn）

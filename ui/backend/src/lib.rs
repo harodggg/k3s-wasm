@@ -18,6 +18,7 @@ mod auth;
 mod config;
 mod http_io;
 mod k8s;
+mod topology;
 
 use http_io::{Request, Response};
 use wasi::exports::http::incoming_handler::Guest;
@@ -93,6 +94,8 @@ fn route_inner(req: &Request, auth_cfg: &auth::AuthConfig, k8s: &k8s::K8s) -> Re
         ("GET", ["api", "events"]) => api::events(req),
         ("GET", ["api", "images"]) => api::images(req),
         ("GET", ["api", "image-tags"]) => api::image_tags(req),
+        // 网络拓扑：一次请求拉回整张图（节点 + 边），前端每 5 秒刷新
+        ("GET", ["api", "topology"]) => topology::topology(req),
 
         // ── SpinKube ───────────────────────────────────────────────
         ("GET", ["api", "spinapps"]) => api::spinapps_list(req),
