@@ -38,11 +38,17 @@ jobs:
           cache: npm
           cache-dependency-path: ui/frontend/package-lock.json
 
-      - name: 构建前端
+      - name: 前端依赖
         working-directory: ui/frontend
-        run: |
-          npm ci --no-audit --no-fund
-          npm run build
+        run: npm ci --no-audit --no-fund
+
+      - name: 守卫：别对后端数据直接用 Object.entries（曾导致自动刷新反复报错）
+        working-directory: ui/frontend
+        run: node scripts/check-no-raw-object-entries.mjs
+
+      - name: 构建前端（含 tsc 类型检查）
+        working-directory: ui/frontend
+        run: npm run build
 
       - name: 构建 wasm 后端（wasm32-wasip2，嵌入真实前端）
         working-directory: ui/backend

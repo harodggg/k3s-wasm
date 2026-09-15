@@ -126,6 +126,20 @@ export function empty(message: string, hint?: string): HTMLElement {
   );
 }
 
+/** 把后端可能给出 null/undefined 的 map 渲染成 `k=v, k2=v2`。
+ *
+ * 存在的理由是一个真实事故：`Object.entries(null)` 抛
+ * "Cannot convert undefined or null to object"，而自动刷新每 5 秒就会把它变成
+ * 页面顶部的错误横幅 —— 看起来像"后端挂了"，其实只是一个空 map。
+ * 所有来自后端的 map 字段都应经过这里，而不是直接 Object.entries。
+ */
+export function pairsText(v: unknown, empty = '（无）'): string {
+  if (!v || typeof v !== 'object') return empty;
+  const entries = Object.entries(v as Record<string, unknown>);
+  if (entries.length === 0) return empty;
+  return entries.map(([k, val]) => `${k}=${String(val)}`).join(', ');
+}
+
 /** 相对时间：k8s 的时间戳都是 RFC3339 UTC */
 export function age(iso?: string | null): string {
   if (!iso) return '-';

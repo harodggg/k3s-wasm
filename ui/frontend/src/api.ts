@@ -102,6 +102,7 @@ export interface RuntimeInfo {
   name: string;
   handler: string;
   isWasm: boolean;
+  /** 永远是对象（后端保证不发 null）；空对象表示没有 selector */
   nodeSelector: Record<string, string>;
   /** null = 无法判定（RuntimeClass 没有 nodeSelector，装没装看标签看不出来） */
   capableNodes: number | null;

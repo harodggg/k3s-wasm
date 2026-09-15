@@ -330,7 +330,14 @@ fn runtime_list(k8s: &K8s, nodes: &[Value]) -> Result<Value, ApiError> {
             let handler = rc["handler"].as_str().unwrap_or("");
             let is_wasm = runtime_is_wasm(handler)
                 || runtime_is_wasm(rc["metadata"]["name"].as_str().unwrap_or(""));
-            let node_selector = rc["scheduling"]["nodeSelector"].clone();
+            // 契约上 nodeSelector 是个 map：没有 scheduler 时**发 {} 而不是 null**。
+            // 事故复盘：早先发 null，前端 Object.entries(null) 抛
+            // "Cannot convert undefined or null to object"，而自动刷新每 5 秒把它刷成横幅。
+            let node_selector = if rc["scheduling"]["nodeSelector"].is_null() {
+                json!({})
+            } else {
+                rc["scheduling"]["nodeSelector"].clone()
+            };
             let selectorless = node_selector
                 .as_object()
                 .map(|o| o.is_empty())

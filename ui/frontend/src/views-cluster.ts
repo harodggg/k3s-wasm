@@ -13,6 +13,7 @@ import {
   empty,
   errorText,
   input,
+  pairsText,
   stat,
   table,
   toast,
@@ -224,7 +225,8 @@ export function runtimesView(): ViewInstance {
         rs.map((r) => [
           el('span', { class: 'mono', text: r.name }),
           el('span', { class: 'mono', text: r.handler }),
-          el('span', { class: 'mono', text: Object.entries(r.nodeSelector).map(([k, v]) => `${k}=${v}`).join(', ') || '（无 → 无法判定节点）' }),
+          // 不要在这里直接 Object.entries：nodeSelector 可能是 null/空
+          el('span', { class: 'mono', text: pairsText(r.nodeSelector, '（无 → 无法判定节点）') }),
           r.capableNodes === null
             ? badge('无法判定', 'muted')
             : r.misconfigured
