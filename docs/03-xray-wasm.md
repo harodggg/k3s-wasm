@@ -32,6 +32,13 @@ runwasi 的 **wasmtime shim** 上 —— 容器里不需要 wasmtime，运行时
 
 清单见 `deploy/xray-wasm/`；控制台的「Xray 隧道」面板会生成同一套对象（含 Secret 与 NetworkPolicy）。
 
+### 端口选择：别用 80/443
+
+k3s 自带的 Traefik 以 `LoadBalancer` Service 暴露，其 servicelb 声明的 **hostPort 80/443 由 Cilium 在 BPF 里实现 —— `ss` 看不到监听者**。
+本仓库实测：把 REALITY 服务端放在 443 上「绑定成功」，但客户端拿到的却是 Traefik 的默认证书
+（`CN=TRAEFIK DEFAULT CERT`）。所以测试服务端用 **8443**。
+要在同一台机器上用 443，先让 Traefik 不再占用它（改 hostNetwork 并显式绑 80/443，或换 LB 方案）。
+
 ## 3. 已知限制（部署前必读）
 
 - **一次只处理一条连接**：wasip2 没有线程，当前是顺序 accept。长连接客户端（HTTP/2、keep-alive）

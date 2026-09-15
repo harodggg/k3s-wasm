@@ -36,6 +36,7 @@
 | `ctr: wrong diff id "sha256:..." calculated on extraction "sha256:..."` | 自己构造 OCI 镜像时把 gzip 层的 `diff_ids` 写成了压缩后字节的摘要 | 层描述符 digest 用**压缩后**、`rootfs.diff_ids` 用**解压后** tar 的摘要（`scripts/make-wasm-image.py` 里有注释） |
 | 刚建完命名空间，组件出站请求挂住，几秒后自己好了 | Cilium 的 BPF 策略/conntrack 对新建的 NetworkPolicy 与 Pod IP 需要几秒铺开 | 重试即可；`verify-wasm-runtime.sh` 已内置最多 60s 的重试 |
 | 改了组件代码、重新导入了镜像，但行为没变 | 镜像 tag 是可变 tag（`:dev`）且 `imagePullPolicy: IfNotPresent`，Pod spec 没变就不会重建 | `kubectl -n k3s-wasm rollout restart deploy/k3s-wasm-ui`；或每次构建用唯一 tag |
+| 自己起的服务在 443/80 上「绑定成功」却收不到外部流量；TLS 探测拿到的是 `CN=TRAEFIK DEFAULT CERT` | k3s servicelb 的 hostPort 由 **Cilium 在 BPF 里**实现，**`ss` 看不到监听者**（所以我们误判 443 空闲）。Traefik 的 LB Service 占着 80/443 | 换端口（实测 8443 可用），或先确认 80/443 真的没人用：`kubectl -n kube-system get svc traefik` 看它的 LB 端口；不要只信 `ss` |
 | `Kubernetes API 返回 403（Forbidden）` | ClusterRole 权限不足 | 报错里带着 k8s 原文（哪个资源、哪个动词），照它加 `deploy/base/kube-api-proxy.yaml` 里的 rules |
 | UI 显示「kube-api-proxy 地址用的是编译期默认值」 | 没有设置 `K8S_PROXY_URL`，正在用默认的 in-cluster 地址 | 标准部署无需处理；非标准命名空间设 env 或构建时烘焙 |
 | 前端白屏，页面显示「前端资源未构建」 | 构建 wasm 时 `ui/frontend/dist` 不存在（build.rs 写入了占位页） | `cd ui/frontend && npm ci && npm run build`，再重新 `cargo build --release --target wasm32-wasip2`；或用 `make ui` |
