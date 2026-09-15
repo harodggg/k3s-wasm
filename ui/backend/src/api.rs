@@ -1661,8 +1661,8 @@ fn xray_create_walljump(req: &Request, body: &Value, cfg: &Config, k8s: &K8s) ->
     let image = body["image"]
         .as_str()
         .filter(|s| !s.is_empty())
-        // v0.4.0 起同一个 wasm 模块同时支持客户端与服务端
-        .unwrap_or("docker.io/k3s-wasm/xray-wasm-cli:v0.4.0")
+        // v0.4.0 起同一个 wasm 模块同时支持客户端与服务端；v0.5.0 起客户端可 --no-flow
+        .unwrap_or("docker.io/k3s-wasm/xray-wasm-cli:v0.5.0")
         .to_string();
     let runtime_class = body["runtimeClassName"]
         .as_str()
@@ -2516,7 +2516,7 @@ mod tests {
                 "replicas": 1,
                 "template": {"spec": {
                     "runtimeClassName": "wasmtime-wasip2",
-                    "containers": [{"image": "docker.io/k3s-wasm/xray-wasm-cli:v0.4.0"}]
+                    "containers": [{"image": "docker.io/k3s-wasm/xray-wasm-cli:v0.5.0"}]
                 }}
             },
             "status": {"readyReplicas": 1}

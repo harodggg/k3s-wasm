@@ -12,7 +12,7 @@ metadata:
   name: k3s-wasm-ui
   namespace: k3s-wasm
 spec:
-  image: docker.io/k3s-wasm/k3s-wasm-ui:v0.5.1
+  image: docker.io/k3s-wasm/k3s-wasm-ui:v0.5.2
   executor: containerd-shim-spin
   replicas: 1
   # operator 会把这两个标签打到 Pod 上，于是 base 里的 Service/NetworkPolicy 选择器依然有效

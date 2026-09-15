@@ -190,7 +190,7 @@ ssh -N -L 1080:$(kubectl -n xray get svc xray-wasm -o jsonpath='{.spec.clusterIP
 
 ### 8.1 为什么两者能共用一个模块
 
-`xray-wasm` **v0.4.0** 起，一个 `xt-wasm-cli.wasm` 同时是客户端与服务端：
+`xray-wasm` **v0.4.0** 起，一个 `xt-wasm-cli.wasm` 同时是客户端与服务端（**v0.5.0** 起客户端支持 `--no-flow`，用于连本工程的服务端）：
 
 ```sh
 # 客户端（隧道模式）：本地 SOCKS5 → REALITY 出

@@ -13,7 +13,7 @@ spin_manifest_version = 2
 
 [application]
 name = "k3s-wasm-ui"
-version = "0.5.1"
+version = "0.5.2"
 description = "k3s WASM 控制台：用 wasm 工作负载管理 wasm 工作负载"
 authors = ["k3s-wasm"]
 
