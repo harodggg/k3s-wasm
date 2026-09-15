@@ -1,0 +1,18 @@
+# 刻意 ClusterIP：上游安全须知明确「不要用 LoadBalancer / NodePort」。
+# 集群外要用，请走 kubectl port-forward（带认证）或 SSH 隧道，见 README。
+apiVersion: v1
+kind: Service
+metadata:
+  name: xray-wasm
+  namespace: xray
+  labels:
+    app.kubernetes.io/name: xray-wasm
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: xray-wasm
+  ports:
+    - name: socks
+      port: 1080
+      targetPort: 1080
+      protocol: TCP

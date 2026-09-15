@@ -1,0 +1,29 @@
+# 两层防护的第二层：认证管「谁能用」，网络策略管「谁能连」。
+#
+# ⚠️ 默认只允许**同命名空间**的 Pod 连接（够跑验证），
+#    要放开给别的命名空间就改 from；别图省事写成空 from（那等于不限制）。
+#    egress 只放行到服务端 IP，避免这个 Pod 被当成跳板去打集群内外其它东西。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: xray-wasm
+  namespace: xray
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: xray-wasm
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 1080
+  egress:
+    # 只要到 REALITY 服务端就够了：客户端所有流量都从这条隧道出去
+    - to:
+        - ipBlock:
+            cidr: <服务端IP>/32
+      ports:
+        - protocol: TCP
+          port: <服务端端口>

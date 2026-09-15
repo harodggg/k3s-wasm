@@ -1,0 +1,67 @@
+# xray-wasm 作为集群内共享 SOCKS5 出口代理 —— 跑在 wasmtime shim 上的**纯 wasm** 工作负载。
+#
+# 与上游 deploy/k8s/deployment.yaml 的差别只有一处：
+#   上游用容器镜像（容器里再跑 wasmtime），这里用 runtimeClassName 直接交给 containerd 的 shim。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: xray-wasm
+  namespace: xray
+  labels:
+    app.kubernetes.io/name: xray-wasm
+spec:
+  # 上游已知限制：一次只处理一条连接。replicas>=2 是当前最主要的缓解手段。
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: xray-wasm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: xray-wasm
+    spec:
+      # 关键：跑在 wasmtime shim 上（handler wasmtime），不是 spin
+      runtimeClassName: wasmtime-wasip2
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: proxy
+          image: docker.io/k3s-wasm/xray-wasm-cli:v0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            # 镜像/组件默认是 127.0.0.1:1080（安全默认）；共享代理必须显式放开，
+            # 并且必须同时配好 XT_SOCKS_USER/PASS，否则就是开放代理。
+            - name: XT_LISTEN
+              value: "0.0.0.0:1080"
+          envFrom:
+            - secretRef:
+                name: xray-wasm
+          ports:
+            - name: socks
+              containerPort: 1080
+              protocol: TCP
+          # 探针会真的占用一次连接机会，所以放宽阈值、且刻意不配 livenessProbe
+          startupProbe:
+            tcpSocket:
+              port: socks
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            tcpSocket:
+              port: socks
+            periodSeconds: 15
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi

@@ -799,12 +799,52 @@ pub fn xray_list(req: &Request) -> Response {
     }))
 }
 
+/// 从 `vless://` 分享链接里解析出隧道参数。
+///
+/// 这样用户可以直接把 xray-deploy 输出的链接粘进来，而不必手工拆 5 个字段
+/// （字段拆错的表现是握手失败，且错误信息很不直观）。
+pub fn parse_vless_link(link: &str) -> Option<Value> {
+    let rest = link.trim().strip_prefix("vless://")?;
+    let (uuid, rest) = rest.split_once('@')?;
+    let (authority, query) = rest.split_once('?')?;
+    let mut out = json!({ "uuid": uuid, "server": authority });
+    for kv in query.split('&') {
+        let Some((k, v)) = kv.split_once('=') else { continue };
+        let v = crate::http_io::percent_decode(v);
+        match k {
+            "pbk" => out["publicKey"] = json!(v),
+            "sid" => out["shortId"] = json!(v),
+            "sni" => out["sni"] = json!(v),
+            "flow" => out["flow"] = json!(v),
+            _ => {}
+        }
+    }
+    Some(out)
+}
+
 pub fn xray_create(req: &Request) -> Response {
     let body = match req.json_body() {
         Ok(b) => b,
         Err(m) => return Response::fail(400, m),
     };
     let (cfg, k8s) = client();
+
+    // 支持直接粘贴 vless:// 链接（`server`/`uuid` 等字段也就自动补全）
+    let body = match body["vlessLink"].as_str().filter(|s| !s.is_empty()) {
+        Some(link) => {
+            let Some(parsed) = parse_vless_link(link) else {
+                return Response::fail(400, "vlessLink 解析失败，期望形如 vless://<uuid>@<ip:port>?pbk=...&sid=...&sni=...");
+            };
+            let mut merged = body.clone();
+            for (k, v) in parsed.as_object().cloned().unwrap_or_default() {
+                if merged.get(&k).map(|x| x.is_null()).unwrap_or(true) {
+                    merged[k] = v;
+                }
+            }
+            merged
+        }
+        None => body,
+    };
 
     let name = match required_str(&body, "name") {
         Ok(v) => v,
@@ -831,145 +871,190 @@ pub fn xray_create(req: &Request) -> Response {
         return Response::fail(400, "name / namespace 必须是合法 DNS-1123 名称");
     }
 
+    // ⚠️ 认证不是可选项：绑非回环地址 + 无认证 = 开放代理（上游文档明确要求）
+    let socks_user = match required_str(&body, "socksUser") {
+        Ok(v) => v,
+        Err(_) => {
+            return Response::fail(
+                400,
+                "必须提供 socksUser/socksPass：绑 0.0.0.0 而无认证的 SOCKS5 就是开放代理",
+            )
+        }
+    };
+    let socks_pass = match required_str(&body, "socksPass") {
+        Ok(v) => v,
+        Err(_) => return Response::fail(400, "必须提供 socksPass"),
+    };
+
     let short_id = body["shortId"].as_str().unwrap_or("").to_string();
     let sni = body["sni"].as_str().unwrap_or("").to_string();
+    let client_ver = body["clientVer"].as_str().unwrap_or("").to_string();
     let listen = body["listen"]
         .as_str()
         .filter(|s| !s.is_empty())
         .unwrap_or("0.0.0.0:1080")
         .to_string();
-    let port = match listen
-        .rsplit_once(':')
-        .and_then(|(_, p)| p.parse::<u16>().ok())
-    {
+    let port = match listen.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok()) {
         Some(p) if p > 0 => p,
-        _ => {
-            return Response::fail(400, format!("listen 必须形如 0.0.0.0:1080，收到：{listen}"))
-        }
+        _ => return Response::fail(400, format!("listen 必须形如 0.0.0.0:1080，收到：{listen}")),
     };
-    let replicas = body["replicas"].as_i64().unwrap_or(1).clamp(0, 100);
+    let replicas = body["replicas"].as_i64().unwrap_or(2).clamp(1, 100);
     let image = body["image"]
         .as_str()
         .filter(|s| !s.is_empty())
-        .unwrap_or("docker.io/k3s-wasm/xray-wasm-cli:dev")
+        .unwrap_or("docker.io/k3s-wasm/xray-wasm-cli:v0.1.0")
         .to_string();
     let runtime_class = body["runtimeClassName"]
         .as_str()
         .filter(|s| !s.is_empty())
         .unwrap_or("wasmtime-wasip2")
         .to_string();
-
-    // 与 xray-wasm/scripts/run-local.sh 的 CLI 契约保持一致：
-    //   --server <ip:port> --pbk <公钥> --sid <shortId> --sni <域名> --uuid <uuid> --listen <addr>
-    // 这里用配置文件下发，避免把 uuid 写进 args（args 在 Pod spec 里全集群可见）。
-    let tunnel_config = json!({
-        "server": server,
-        "uuid": uuid,
-        "publicKey": public_key,
-        "shortId": short_id,
-        "sni": sni,
-        "listen": listen,
-    });
+    let secret_name = body["secretName"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&name)
+        .to_string();
 
     let labels = json!({
-        "app.kubernetes.io/name": format!("xray-{name}"),
-        "app.kubernetes.io/instance": name,
+        "app.kubernetes.io/name": name,
         "app.kubernetes.io/part-of": XRAY_PART_OF,
         "app.kubernetes.io/managed-by": MANAGED_BY,
     });
 
-    // 1) 配置
-    let configmap = json!({
-        "apiVersion": "v1",
-        "kind": "ConfigMap",
-        "metadata": {
-            "name": tunnel_configmap_name(&name),
-            "namespace": namespace,
-            "labels": labels,
-        },
-        "data": { "tunnel.json": tunnel_config.to_string() },
-    });
-    if let Err(e) = k8s.post(
-        &format!("/api/v1/namespaces/{namespace}/configmaps"),
-        &configmap,
-    ) {
-        return from_err(e);
+    // 1) 凭据放 Secret。也可以传 secretName 引用一个你**预先建好**的 Secret，
+    //    这样控制台就不需要 secrets 的写权限（见 deploy/base/kube-api-proxy.yaml 的说明）。
+    if body["secretName"].as_str().filter(|s| !s.is_empty()).is_none() {
+        let mut string_data = serde_json::Map::new();
+        string_data.insert("XT_SERVER".into(), json!(server));
+        string_data.insert("XT_UUID".into(), json!(uuid));
+        string_data.insert("XT_PBK".into(), json!(public_key));
+        string_data.insert("XT_SID".into(), json!(short_id));
+        string_data.insert("XT_SNI".into(), json!(sni));
+        string_data.insert("XT_SOCKS_USER".into(), json!(socks_user));
+        string_data.insert("XT_SOCKS_PASS".into(), json!(socks_pass));
+        if !client_ver.is_empty() {
+            string_data.insert("XT_CLIENT_VER".into(), json!(client_ver));
+        }
+        let secret = json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": secret_name, "namespace": namespace, "labels": labels },
+            "type": "Opaque",
+            "stringData": Value::Object(string_data),
+        });
+        if let Err(e) = k8s.post(&format!("/api/v1/namespaces/{namespace}/secrets"), &secret) {
+            return Response::fail(
+                e.http_status(),
+                format!(
+                    "创建 Secret 失败：{}。两条出路：① 给控制台加上 secrets 写权限；\
+                     ② 自己先建好 Secret，然后在表单里填「已有 Secret 名称」（这样控制台只引用、不创建）。",
+                    e.message()
+                ),
+            );
+        }
     }
 
-    // 2) 工作负载：裸 wasm32-wasip2 命令组件，跑在 wasmtime 运行时上
+    // 2) 工作负载：纯 wasm，跑在 wasmtime shim 上
     let deployment = json!({
         "apiVersion": "apps/v1",
         "kind": "Deployment",
-        "metadata": {
-            "name": name,
-            "namespace": namespace,
-            "labels": labels,
-            "annotations": { "k3s-wasm/managed-by": MANAGED_BY },
-        },
+        "metadata": { "name": name, "namespace": namespace, "labels": labels },
         "spec": {
             "replicas": replicas,
-            "selector": { "matchLabels": { "app.kubernetes.io/name": format!("xray-{name}") } },
+            "selector": { "matchLabels": { "app.kubernetes.io/name": name } },
             "template": {
                 "metadata": { "labels": labels },
                 "spec": {
                     "runtimeClassName": runtime_class,
                     "containers": [{
-                        "name": "tunnel",
+                        "name": "proxy",
                         "image": image,
                         "imagePullPolicy": "IfNotPresent",
-                        // 命令式 wasm：镜像里的 .wasm 就是进程，args[0] 是它在容器里的路径
-                        "args": ["/xray-wasm-cli.wasm", "--config", "/etc/xray-wasm/tunnel.json"],
-                        "ports": [{ "name": "socks", "containerPort": port }],
-                        "volumeMounts": [{
-                            "name": "tunnel-config",
-                            "mountPath": "/etc/xray-wasm",
-                            "readOnly": true,
-                        }],
+                        // 全部配置走环境变量（来自 Secret），args 里不放凭据：
+                        // kubectl describe pod 会把 args 原样打印出来。
+                        "env": [
+                            { "name": "XT_LISTEN", "value": listen },
+                            // 上游已知限制：一次只处理一条连接，探针会占用一次机会
+                            { "name": "XT_HANDSHAKE_TIMEOUT", "value": "15" }
+                        ],
+                        "envFrom": [{ "secretRef": { "name": secret_name } }],
+                        "ports": [{ "name": "socks", "containerPort": port, "protocol": "TCP" }],
+                        // 刻意不配 livenessProbe：单连接模型下它更容易误杀
+                        "startupProbe": {
+                            "tcpSocket": { "port": port },
+                            "periodSeconds": 2, "failureThreshold": 30
+                        },
+                        "readinessProbe": {
+                            "tcpSocket": { "port": port },
+                            "periodSeconds": 15, "failureThreshold": 6
+                        },
                         "resources": {
                             "requests": { "cpu": "10m", "memory": "32Mi" },
-                            "limits": { "memory": "128Mi" },
-                        },
-                    }],
-                    "volumes": [{
-                        "name": "tunnel-config",
-                        "configMap": { "name": tunnel_configmap_name(&name) },
-                    }],
-                },
-            },
-        },
+                            "limits": { "memory": "128Mi" }
+                        }
+                    }]
+                }
+            }
+        }
     });
-    if let Err(e) = k8s.post(
-        &format!("/apis/apps/v1/namespaces/{namespace}/deployments"),
-        &deployment,
-    ) {
+    if let Err(e) = k8s.post(&format!("/apis/apps/v1/namespaces/{namespace}/deployments"), &deployment) {
         return from_err(e);
     }
 
-    // 3) Service：让集群内其它 Pod 能用上这个 SOCKS5 出口
+    // 3) ClusterIP Service（刻意不用 NodePort/LoadBalancer）
     let service = json!({
         "apiVersion": "v1",
         "kind": "Service",
         "metadata": { "name": name, "namespace": namespace, "labels": labels },
         "spec": {
             "type": "ClusterIP",
-            "selector": { "app.kubernetes.io/name": format!("xray-{name}") },
-            "ports": [{ "name": "socks", "port": port, "targetPort": port, "protocol": "TCP" }],
-        },
+            "selector": { "app.kubernetes.io/name": name },
+            "ports": [{ "name": "socks", "port": port, "targetPort": port, "protocol": "TCP" }]
+        }
     });
-    if let Err(e) = k8s.post(
-        &format!("/api/v1/namespaces/{namespace}/services"),
-        &service,
-    ) {
+    if let Err(e) = k8s.post(&format!("/api/v1/namespaces/{namespace}/services"), &service) {
         return from_err(e);
+    }
+
+    // 4) NetworkPolicy：认证管「谁能用」，它管「谁能连」
+    let server_host = server.rsplit_once(':').map(|(h, _)| h).unwrap_or(&server).to_string();
+    let server_port = server.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok()).unwrap_or(443);
+    let netpol = json!({
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": { "name": name, "namespace": namespace, "labels": labels },
+        "spec": {
+            "podSelector": { "matchLabels": { "app.kubernetes.io/name": name } },
+            "policyTypes": ["Ingress", "Egress"],
+            "ingress": [{
+                "from": [{ "podSelector": {} }],
+                "ports": [{ "protocol": "TCP", "port": port }]
+            }],
+            "egress": [
+                // 只需要到 REALITY 服务端：所有客户端流量都从这条隧道出去
+                { "to": [{ "ipBlock": { "cidr": format!("{server_host}/32") } }],
+                  "ports": [{ "protocol": "TCP", "port": server_port }] }
+            ]
+        }
+    });
+    if let Err(e) = k8s.post(&format!("/apis/networking.k8s.io/v1/namespaces/{namespace}/networkpolicies"), &netpol) {
+        // NetworkPolicy 失败不算致命（Cilium/某些 CNI 行为差异），但要如实告诉用户
+        return Response::ok(json!({
+            "created": true, "namespace": namespace, "name": name,
+            "socksEndpoint": format!("{name}.{namespace}.svc.cluster.local:{port}"),
+            "warning": format!("Deployment/Service 已建，但 NetworkPolicy 创建失败：{}", e.message()),
+        }));
     }
 
     Response::ok(json!({
         "created": true,
         "namespace": namespace,
         "name": name,
+        "secret": secret_name,
         "socksEndpoint": format!("{name}.{namespace}.svc.cluster.local:{port}"),
-        "note": "xray-wasm 的隧道层尚未合入（xt-wasm-cli 目前是桩，会以退出码 2 结束）；\
-                 且 wasmtime shim 默认不授予出站 TCP，见 docs/03-xray-wasm.md 的「运行时常量」。",
+        "portForward": format!("kubectl -n {namespace} port-forward svc/{name} 1080:{port}"),
+        "usage": format!("curl --proxy-user '<user>:<pass>' --proxy socks5h://{name}.{namespace}.svc.cluster.local:{port} https://example.com"),
+        "note": "SOCKS5 必须带认证（表单已强制）；Service 刻意是 ClusterIP，不要改成 NodePort。",
     }))
 }
 
@@ -1124,6 +1209,18 @@ mod tests {
         ]});
         let filtered = filter_items_by_ns(list, "a");
         assert_eq!(filtered["items"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parse_vless_link_extracts_fields() {
+        let link = "vless://11111111-2222-3333-4444-555555555555@203.0.113.10:443?type=tcp&security=reality&pbk=PUBKEY&sid=9f1c2a3b&sni=www.amazon.com&fp=chrome&flow=xtls-rprx-vision#Xray";
+        let v = parse_vless_link(link).expect("应能解析");
+        assert_eq!(v["uuid"], "11111111-2222-3333-4444-555555555555");
+        assert_eq!(v["server"], "203.0.113.10:443");
+        assert_eq!(v["publicKey"], "PUBKEY");
+        assert_eq!(v["shortId"], "9f1c2a3b");
+        assert_eq!(v["sni"], "www.amazon.com");
+        assert!(parse_vless_link("http://x").is_none());
     }
 
     #[test]

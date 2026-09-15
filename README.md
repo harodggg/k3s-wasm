@@ -107,14 +107,23 @@ make e2e                          # 31 项端到端断言（真实 wasm 宿主�
 - **Xray 隧道**：把 `xray-wasm` 作为 wasm 工作负载下发（ConfigMap + Deployment + Service）—— **见下方说明**
 - **日志 / 事件**：Pod 日志跟随刷新、命名空间事件（排障用）
 
-### 关于 Xray 面板（说实话）
+### Xray 面板（已可用于生产形态的部署）
 
-`xray-wasm` 仓库里 `xt-wasm-cli` 的隧道层**还没接入**（`main.rs` 目前直接 `exit 2`），
-所以面板创建出来的 Pod 会立刻退出。面板本身（配置下发、扩缩容、Service 暴露）
-是完整可用且已实测的；等 M2/M3 落地后接上即可。另外 wasmtime shim 默认不授予出站 TCP，
-而建隧道必须有出站能力 —— 细节和绕过方式见 `docs/03-xray-wasm.md`。
+`xray-wasm` 的 `xt-wasm-cli.wasm`（298 KB）可以直接跑在 k3s 的 wasmtime shim 上 ——
+**容器里不含 wasmtime**，运行时就是 containerd 的 shim。面板会下发：
 
----
+| 对象 | 内容 |
+|---|---|
+| Secret | `XT_SERVER / XT_UUID / XT_PBK / XT_SID / XT_SNI / XT_SOCKS_USER / XT_SOCKS_PASS` |
+| Deployment | `runtimeClassName: wasmtime-wasip2`，配置全走环境变量（不进 args），默认 2 副本 |
+| Service | **ClusterIP**（上游安全须知明确不要 NodePort/LoadBalancer） |
+| NetworkPolicy | 认证管「谁能用」，它管「谁能连」，egress 收紧到 REALITY 服务端 IP |
+
+表单支持直接粘贴 `vless://` 链接自动拆参数；强制要求 SOCKS5 用户名/密码
+（绑 `0.0.0.0` 而无认证就是开放代理）。清单也可直接用 `deploy/xray-wasm/`。
+
+真机验证（k3s v1.36 + wasmtime shim v0.6.1）：`--self-test` REALITY 握手 11.7ms；
+经隧道出网 HTTP 200；**无认证请求被拒绝**（`No authentication method was acceptable`）。
 
 ## 目录结构
 
@@ -133,7 +142,8 @@ k3s-wasm/
 │   └── lib/common.sh
 ├── deploy/
 │   ├── base/                      # namespace / RuntimeClass / RBAC / kube-api-proxy / Service
-│   └── overlays/{shim-only,spinkube}/
+│   ├── overlays/{shim-only,spinkube}/
+│   └── xray-wasm/                 # 把 xt-wasm-cli.wasm 作为纯 wasm 工作负载部署的清单
 ├── ui/
 │   ├── backend/                   # Rust → wasm32-wasip2（wasi:http/proxy 组件）
 │   └── frontend/                  # 无框架 TS SPA（Vite，36 KB）

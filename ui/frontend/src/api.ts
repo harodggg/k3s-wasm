@@ -236,11 +236,19 @@ export interface CreateSpinAppBody {
 export interface CreateTunnelBody {
   name: string;
   namespace?: string;
+  /** 可直接粘贴 xray-deploy 输出的 vless:// 链接，server/uuid/pbk/sid/sni 会自动补全 */
+  vlessLink?: string;
   server: string;
   uuid: string;
   publicKey: string;
   shortId?: string;
   sni?: string;
+  /** SOCKS5 认证：绑 0.0.0.0 时**必填**（否则就是开放代理） */
+  socksUser: string;
+  socksPass: string;
+  /** 引用一个你预先建好的 Secret（给了它就不用控制台创建 Secret） */
+  secretName?: string;
+  clientVer?: string;
   listen?: string;
   replicas?: number;
   image?: string;

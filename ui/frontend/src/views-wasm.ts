@@ -192,6 +192,8 @@ function kv(k: string, v: string): Node {
 
 // ── xray-wasm 隧道 ──────────────────────────────────────────────────
 
+// ── xray-wasm 隧道 ──────────────────────────────────────────────────
+
 export function xrayView(): ViewInstance {
   let host: HTMLElement | null = null;
   let ctx: Ctx;
@@ -277,27 +279,49 @@ export function xrayView(): ViewInstance {
       clear(host);
 
       const name = input('tokyo');
+      const vlessLink = input('可选：直接粘贴 vless:// 链接，下面几项会自动补全');
       const server = input('203.0.113.10:443');
       const uuid = input('xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx');
-      const publicKey = input('REALITY 公钥（xray x25519 输出里的 Password/公钥）');
+      const publicKey = input('REALITY 公钥（xray x25519 的 Password/公钥）');
       const shortId = input('9f1c2a3b');
       const sni = input('www.amazon.com');
+      const socksUser = input('xrayuser', 'xrayuser');
+      const socksPass = input('必填：否则 0.0.0.0 上的无认证 SOCKS5 就是开放代理');
+      const secretName = input('可选：引用已存在的 Secret（填了就不由控制台创建）');
       const listen = input('0.0.0.0:1080', '0.0.0.0:1080');
-      const replicas = input('1', '1', 'number') as HTMLInputElement;
-      const image = input('k3s-wasm/xray-wasm-cli:dev');
+      const replicas = input('2', '2', 'number') as HTMLInputElement;
+      const image = input('docker.io/k3s-wasm/xray-wasm-cli:v0.1.0');
+
+      // vless:// 解析放在后端做（前端只把原文传过去），避免两处实现漂移
+      vlessLink.addEventListener('change', () => {
+        const m = /^vless:\/\/([^@]+)@([^?]+)\?(.*)$/.exec(vlessLink.value.trim());
+        if (!m) return;
+        uuid.value = m[1] ?? '';
+        server.value = m[2] ?? '';
+        for (const kv of (m[3] ?? '').split('&')) {
+          const [k, v] = kv.split('=');
+          if (k === 'pbk') publicKey.value = decodeURIComponent(v ?? '');
+          if (k === 'sid') shortId.value = decodeURIComponent(v ?? '');
+          if (k === 'sni') sni.value = decodeURIComponent(v ?? '');
+        }
+      });
 
       const create = button('创建隧道', async () => {
         try {
           await ctx.api.createTunnel({
             name: name.value.trim(),
             namespace: ctx.currentNamespace === '_all' ? ctx.defaultNamespace : ctx.currentNamespace,
+            vlessLink: vlessLink.value.trim() || undefined,
             server: server.value.trim(),
             uuid: uuid.value.trim(),
             publicKey: publicKey.value.trim(),
             shortId: shortId.value.trim(),
             sni: sni.value.trim(),
+            socksUser: socksUser.value.trim(),
+            socksPass: socksPass.value,
+            secretName: secretName.value.trim() || undefined,
             listen: listen.value.trim(),
-            replicas: Number(replicas.value || '1'),
+            replicas: Number(replicas.value || '2'),
             image: image.value.trim(),
           });
           toast(`已创建 ${name.value}`);
@@ -334,12 +358,15 @@ export function xrayView(): ViewInstance {
             el(
               'div',
               { class: 'stack' },
-              el('div', { class: 'grid-2-tight' }, field('名称', name), field('命名空间内副本', replicas)),
+              el('div', { class: 'grid-2-tight' }, field('名称', name), field('副本（≥2 缓解单连接限制）', replicas)),
+              field('vless:// 链接（可选）', vlessLink, '粘贴后自动填下面几项；也可以手工填'),
               field('服务端地址', server, 'VLESS + REALITY 的 ip:port'),
               field('UUID', uuid),
               field('REALITY 公钥', publicKey),
               el('div', { class: 'grid-2-tight' }, field('shortId', shortId), field('SNI', sni)),
-              el('div', { class: 'grid-2-tight' }, field('SOCKS5 监听', listen), field('镜像', image)),
+              el('div', { class: 'grid-2-tight' }, field('SOCKS5 用户名', socksUser), field('SOCKS5 密码', socksPass)),
+              el('div', { class: 'grid-2-tight' }, field('已有 Secret（可选）', secretName), field('SOCKS5 监听', listen)),
+              field('镜像', image),
               create,
             ),
           ),
