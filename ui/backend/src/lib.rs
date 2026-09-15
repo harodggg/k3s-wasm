@@ -76,6 +76,7 @@ fn route(req: &Request) -> Response {
         ("POST", ["api", "xray", "tunnels", ns, name, "scale"]) => {
             api::xray_scale(req, ns, name)
         }
+        ("GET", ["api", "xray", "tunnels", ns, name, "vless"]) => api::xray_vless(req, ns, name),
         ("DELETE", ["api", "xray", "tunnels", ns, name]) => api::xray_delete(req, ns, name),
 
         // 其它 /api/* 一律 JSON 404（不要落到静态资源，否则前端会拿到 HTML）

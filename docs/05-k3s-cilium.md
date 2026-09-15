@@ -105,7 +105,54 @@ containerd: failed to unmarshal TOML: toml: table spin already exists
 而且脚本会在「会撞表」时拒绝执行。另外脚本现在会用 k3s 自带的 containerd
 `config dump` 校验生成的配置 —— 这类错一秒就能发现。
 
-## 4. 与本仓库其余部分的衔接
+## 4. 443 归 Traefik，而 REALITY 仍要在 443 上服务
+
+约束是「**除了 Traefik，任何应用都不许占用 443**」。做法：Traefik 持有 80/443（servicelb），
+REALITY 让出 443 改听 **8443**，再由 Traefik 按 **SNI 做 TLS 直通**把 443 上的流量原样转给 REALITY：
+
+```yaml
+# 1) 节点上的 REALITY 需要一个集群内可达的入口（无 selector + 手工 EndpointSlice）
+kind: Service            # xray-reality-ext: 8443 → 节点IP:8443
+kind: EndpointSlice      # endpoints: 2.29.44.63
+---
+# 2) Traefik TCP 直通（passthrough：不解密，REALITY 自己完成 TLS）
+apiVersion: traefik.io/v1alpha1
+kind: IngressRouteTCP
+metadata: { name: reality, namespace: k3s-wasm }
+spec:
+  entryPoints: [websecure]
+  routes:
+    - match: HostSNI(`www.cloudflare.com`)
+      services: [{ name: xray-reality-ext, port: 8443 }]
+  tls: { passthrough: true }
+```
+
+实测（外网）：
+
+```
+2.29.44.63:443 + SNI=www.cloudflare.com → HTTP 200，证书 subject=CN=www.cloudflare.com（真实 Cloudflare 证书）
+2.29.44.63:443 + 其它 SNI            → HTTP 404（Traefik 应答，未匹配直通路由）
+2.29.44.63:8443（绕过 Traefik）      → HTTP 403（REALITY 回落，说明本体也在正常服务）
+```
+
+⚠️ **SNI 必须同步**：Traefik 的 `HostSNI(...)` 与 REALITY 服务端配置里的 `serverNames` / 客户端的 `sni`
+是同一个值。改了 SNI 却忘了改这条路由，表现就是「443 突然 404、隧道全断」。
+想让 443 完全专供 REALITY，就用 `HostSNI(`*`)`（代价是 443 上不能再做普通 HTTPS Ingress）。
+
+### 集群内客户端请走 ClusterIP，别绕公网
+
+隧道（wasm 客户端）如果指向节点的**公网 IP:443**，会走一遍 hairpin（pod → 公网 IP → BPF hostPort → Traefik），
+实测**不通**；改成上面那个 Service 的 **ClusterIP:8443** 后立刻正常：
+
+```
+tokyo（集群内）XT_SERVER=10.43.255.49:8443  → 经隧道出网 HTTP 200
+home （对外）  NodePort 31080 + XT_SERVER 同上 → 外网经它出网 HTTP 200
+```
+
+于是「对外地址」与「客户端地址」是两件事：分享链接用前者（部署上的
+`k3s-wasm/public-server` 注解，例如 `2.29.44.63:443`），客户端用后者（Secret 里的 `XT_SERVER`）。
+
+## 5. 与本仓库其余部分的衔接
 
 ```bash
 # 一键：k3s + Cilium + Hubble UI + wasm 运行时

@@ -167,7 +167,17 @@ ssh -N -L 1080:$(kubectl -n xray get svc xray-wasm -o jsonpath='{.spec.clusterIP
 > 为什么不做成 NodePort/LoadBalancer：那等于把你的出口代理公开给全网。
 > 需要长期外部访问的话，用 WireGuard/Tailscale 之类把节点网络接通，再走 ② 或 ③。
 
-## 7. 换到自己的服务端
+## 7. 面板新增的两个能力
+
+| 能力 | 说明 |
+|---|---|
+| **按需展示 vless 链接** | 列表里点「显示 vless 链接」→ `GET /api/xray/tunnels/:ns/:name/vless`，从该隧道**自己的 Secret** 重建链接。不含 REALITY 私钥；链接里的地址优先取部署注解 `k3s-wasm/public-server`（对外地址），而隧道客户端实际连的是 Secret 里的 `XT_SERVER`（可能是 ClusterIP） |
+| **生成参数分「入站/出站」** | `POST /api/xray/generate` 增加 `usage: cluster\|nodeport`，返回里除了服务端/客户端配置，还分别给出 `outbound`（集群内 Pod 怎么用：环境变量、curl 示例）与 `inbound`（外部怎么用：NodePort 端点、curl 示例、浏览器不支持的场景给 `gost` 本地中转示例） |
+
+读 Secret 的权限是**命名空间级 Role**（`k3s-wasm-tunnel-secrets`，只 `get`），不是集群级
+`get secrets` —— 后者等于能读全集群密钥。在别的命名空间建隧道时，把这份 Role/RoleBinding 复制过去。
+
+## 8. 换到自己的服务端
 
 ```bash
 kubectl -n xray create secret generic xray-wasm \

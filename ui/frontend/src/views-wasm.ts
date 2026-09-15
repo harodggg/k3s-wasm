@@ -217,6 +217,7 @@ export function xrayView(): ViewInstance {
 
   function renderTunnel(t: XrayTunnel): HTMLElement {
     const port = (t.tunnel.listen ?? '0.0.0.0:1080').split(':').pop() ?? '1080';
+    const vlessBox = el('div', { class: 'stack' });
     return card(
       t.name,
       el(
@@ -247,6 +248,7 @@ export function xrayView(): ViewInstance {
           kv('运行时', t.runtimeClass),
           kv('镜像', t.image ?? '-'),
         ),
+        vlessBox,
         el(
           'div',
           { class: 'row-actions' },
@@ -261,10 +263,41 @@ export function xrayView(): ViewInstance {
               }
             }),
           ),
+          button('显示 vless 链接', async () => {
+            vlessBox.replaceChildren(el('div', { class: 'field-label', text: '读取中…' }));
+            try {
+              const v = await ctx.api.tunnelVless(t.namespace, t.name);
+              const ta = el('textarea', {
+                class: 'input mono',
+                attrs: { readonly: '', rows: '3' },
+              }) as HTMLTextAreaElement;
+              ta.value = v.vlessLink;
+              vlessBox.replaceChildren(
+                el('div', { class: 'field-label', text: `vless:// 链接（含客户端凭据，别公开）` }),
+                ta,
+                el(
+                  'div',
+                  { class: 'row-actions' },
+                  button('复制链接', async () => {
+                    const ok = await copyText(v.vlessLink);
+                    toast(ok ? '已复制 vless 链接' : '复制失败，请手动复制', ok ? 'ok' : 'err');
+                  }),
+                  button('复制 SOCKS5 用法', async () => {
+                    const line = `curl --proxy-user '${v.socksUser}:<密码>' --proxy socks5h://${v.socksEndpoint} https://api.ipify.org`;
+                    const ok = await copyText(line);
+                    toast(ok ? '已复制（密码用你创建时设置的）' : '复制失败', ok ? 'ok' : 'err');
+                  }),
+                ),
+                el('div', { class: 'field-hint', text: v.note }),
+              );
+            } catch (e) {
+              vlessBox.replaceChildren(el('div', { class: 'field-hint', text: `读取失败：${errorText(e)}` }));
+            }
+          }),
           button(
             '删除',
             async () => {
-              if (!confirm(`删除隧道 ${t.namespace}/${t.name}（Deployment + Service + ConfigMap）？`)) return;
+              if (!confirm(`删除隧道 ${t.namespace}/${t.name}（Deployment + Service + Secret + NetworkPolicy）？`)) return;
               try {
                 await ctx.api.deleteTunnel(t.namespace, t.name);
                 toast('已删除');
@@ -346,13 +379,26 @@ export function xrayView(): ViewInstance {
 
       // ① 自动生成：一次给全套参数（REALITY 密钥对 + UUID + shortId + SOCKS 凭据），
       //    并把服务端 config.json 与 vless:// 链接一起显示出来，省掉手工拆字段。
+      const genUsage = el('select', { class: 'input' }) as HTMLSelectElement;
+      for (const [v, label] of [
+        ['cluster', '只给集群内用（出站）'],
+        ['nodeport', '还要给外部/本机用（入站 + 出站）'],
+      ] as [string, string][]) {
+        const o = el('option', { text: label }) as HTMLOptionElement;
+        o.value = v;
+        genUsage.append(o);
+      }
+
       const generate = button('① 自动生成参数', async () => {
         try {
           const g = await ctx.api.generateTunnel({
             server: server.value.trim() || undefined,
             sni: sni.value.trim() || undefined,
             name: name2.value.trim() || undefined,
+            usage: genUsage.value === 'nodeport' ? 'nodeport' : 'cluster',
           });
+          // 生成的用途也同步到创建表单，避免两处不一致
+          exposeSel.value = g.usage === 'nodeport' ? 'nodeport' : 'cluster';
           uuid.value = g.uuid;
           publicKey.value = g.publicKey;
           shortId.value = g.shortId;
@@ -392,6 +438,8 @@ export function xrayView(): ViewInstance {
             block('vless:// 分享链接（导入官方客户端 / xrayTun）', g.vlessLink, 3),
             block('服务端 config.json（粘到服务器）', JSON.stringify(g.serverConfig, null, 2), 14),
             block('客户端 config.json（用官方 Xray 先验证服务端）', JSON.stringify(g.clientConfig, null, 2), 12),
+            block('出站：集群内怎么用（环境变量 / curl）', JSON.stringify(g.outbound, null, 2), 9),
+            block('入站：外部/本机怎么用', JSON.stringify(g.inbound, null, 2), 9),
             el(
               'ul',
               { class: 'notes' },
@@ -486,6 +534,7 @@ export function xrayView(): ViewInstance {
               'div',
               { class: 'stack' },
               el('div', { class: 'grid-2-tight' }, field('名称', name), field('副本（≥2 缓解单连接限制）', replicas)),
+              field('生成用途', genUsage, '决定生成的配置里给不给「外部经节点IP」那一套'),
               generate,
               generated,
               field('vless:// 链接（可选）', vlessLink, '粘贴后自动填下面几项；也可以手工填'),

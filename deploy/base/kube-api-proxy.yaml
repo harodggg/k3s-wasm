@@ -97,6 +97,38 @@ subjects:
     name: kube-api-proxy
     namespace: k3s-wasm
 ---
+# 控制台要「展示 vless 链接」就得读该隧道自己的 Secret（XT_UUID/XT_PBK…）。
+# 这里刻意**不用集群级 `get secrets`**（那等于能读全集群密钥），
+# 而是在隧道所在命名空间里给一个 Role —— 只覆盖这些命名空间。
+# 在别的命名空间建隧道时，请把这份 Role/RoleBinding 复制过去。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: k3s-wasm-tunnel-secrets
+  namespace: k3s-wasm
+  labels:
+    app.kubernetes.io/part-of: k3s-wasm
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: k3s-wasm-tunnel-secrets
+  namespace: k3s-wasm
+  labels:
+    app.kubernetes.io/part-of: k3s-wasm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: k3s-wasm-tunnel-secrets
+subjects:
+  - kind: ServiceAccount
+    name: kube-api-proxy
+    namespace: k3s-wasm
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:

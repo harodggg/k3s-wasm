@@ -227,6 +227,11 @@ export interface GeneratedTunnel {
   vlessLink: string;
   serverConfig: Record<string, unknown>;
   clientConfig: Record<string, unknown>;
+  usage: string;
+  /** 出站：集群内 Pod 怎么用它 */
+  outbound: Record<string, unknown>;
+  /** 入站：外部/本机怎么用它（未开放外部时是一段说明） */
+  inbound: Record<string, unknown>;
   notes: string[];
 }
 
@@ -235,6 +240,22 @@ export interface GenerateTunnelBody {
   sni?: string;
   name?: string;
   socksUser?: string;
+  /** cluster = 只给集群内 Pod 用（出站）；nodeport = 也要给外部/本机用（入站） */
+  usage?: 'cluster' | 'nodeport';
+}
+
+/** 按需重建出来的 vless 链接（不含 REALITY 私钥） */
+export interface TunnelVless {
+  name: string;
+  namespace: string;
+  vlessLink: string;
+  server: string;
+  sni: string;
+  shortId: string;
+  publicKey: string;
+  socksUser: string;
+  socksEndpoint: string;
+  note: string;
 }
 
 export interface XrayList {
@@ -358,6 +379,10 @@ export const api = {
   createTunnel: (body: CreateTunnelBody) => post<CreatedTunnel>('/api/xray/tunnels', body),
   scaleTunnel: (ns: string, name: string, replicas: number) =>
     post<unknown>(`/api/xray/tunnels/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/scale`, { replicas }),
+  tunnelVless: (ns: string, name: string) =>
+    request<TunnelVless>(
+      `/api/xray/tunnels/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/vless`,
+    ),
   deleteTunnel: (ns: string, name: string) =>
     del<unknown>(`/api/xray/tunnels/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`),
 };

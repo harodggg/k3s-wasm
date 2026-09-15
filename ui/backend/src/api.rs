@@ -981,6 +981,13 @@ pub fn xray_create(req: &Request) -> Response {
     let node_port = body["nodePort"].as_u64().filter(|p| (30000..=32767).contains(p));
     // 外部可用时，NetworkPolicy 必须放行来源 —— 否则 Cilium 会把 NodePort 进来的流量丢掉。
     // 默认 0.0.0.0/0（等于公开），强烈建议填自己的出口 IP/CIDR。
+    // 分享链接里用的对外地址（如 2.29.44.63:443，经 Traefik）；不填则链接用 XT_SERVER
+    let public_server = body["publicServer"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_string();
     let allow_from = body["allowFrom"]
         .as_str()
         .map(str::trim)
@@ -1056,6 +1063,7 @@ pub fn xray_create(req: &Request) -> Response {
                 "k3s-wasm/short-id": short_id,
                 "k3s-wasm/listen": listen,
                 "k3s-wasm/expose": if external { "nodeport" } else { "cluster" },
+                "k3s-wasm/public-server": public_server.as_str(),
                 "k3s-wasm/allow-from": if external { allow_from.as_str() } else { "" },
             },
         },
@@ -1189,6 +1197,80 @@ pub fn xray_create(req: &Request) -> Response {
         } else {
             "仅集群内可用（ClusterIP）。要用它翻墙/给本机用：改用途为 nodeport，或用 port-forward / SSH 隧道。"
         },
+    }))
+}
+
+/// GET /api/xray/tunnels/:ns/:name/vless
+///
+/// 从该隧道自己的 Secret 里读出参数并重建 `vless://` 链接。
+/// 链接不含 REALITY 私钥（私钥只在服务端），所以这是「客户端凭据」级别的敏感信息：
+/// 因此**只在被显式请求时返回**，不塞进列表响应（避免进日志/缓存）。
+pub fn xray_vless(_req: &Request, ns: &str, name: &str) -> Response {
+    let (_cfg, k8s) = client();
+    if !is_dns1123_label(ns) || !is_dns1123_label(name) {
+        return Response::fail(400, "命名空间或名称不合法");
+    }
+    let secret = match k8s.get(&format!("/api/v1/namespaces/{ns}/secrets/{name}")) {
+        Ok(v) => v,
+        Err(e) if e.is_not_found() => {
+            return Response::fail(404, "找不到该隧道的 Secret（可能不是本控制台创建的，或已被删除）")
+        }
+        Err(e) if e.is_forbidden() => {
+            return Response::fail(
+                403,
+                "没有读取 Secret 的权限。需要在该命名空间给 kube-api-proxy 这个 SA 加 secrets get \
+                 （见 deploy/base/kube-api-proxy.yaml 里那个命名空间级 Role）。",
+            )
+        }
+        Err(e) => return from_err(e),
+    };
+
+    use base64::Engine as _;
+    let dec = |key: &str| -> String {
+        secret["data"][key]
+            .as_str()
+            .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
+            .map(|raw| String::from_utf8_lossy(&raw).to_string())
+            .unwrap_or_default()
+    };
+
+    let uuid = dec("XT_UUID");
+    let server = dec("XT_SERVER");
+    let pbk = dec("XT_PBK");
+    let sid = dec("XT_SID");
+    let sni = dec("XT_SNI");
+    let socks_user = dec("XT_SOCKS_USER");
+    if uuid.is_empty() || server.is_empty() || pbk.is_empty() {
+        return Response::fail(422, "Secret 里缺少 XT_UUID / XT_SERVER / XT_PBK，无法重建链接");
+    }
+
+    // 分享链接要给**外部**用：优先取部署上的 k3s-wasm/public-server（例如经 Traefik 的 443）；
+    // 而隧道客户端自己连的是 XT_SERVER（可能是集群内 ClusterIP，对外无意义）。
+    let dep = k8s
+        .get(&format!("/apis/apps/v1/namespaces/{ns}/deployments/{name}"))
+        .ok();
+    let public_server = dep
+        .as_ref()
+        .and_then(|d| d["metadata"]["annotations"]["k3s-wasm/public-server"].as_str())
+        .map(str::to_string)
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| server.clone());
+
+    let link = build_vless_link(&uuid, &public_server, &pbk, &sid, &sni, name);
+    Response::ok(json!({
+        "name": name,
+        "namespace": ns,
+        "vlessLink": link,
+        // 说明两件事：链接里的地址（对外）与客户端实际连的地址（可能不同）
+        "server": public_server,
+        "clientServer": server,
+        "sni": sni,
+        "shortId": sid,
+        "publicKey": pbk,
+        // SOCKS5 用户名可以给（用于拼连接命令）；密码**不回显**
+        "socksUser": socks_user,
+        "socksEndpoint": format!("{name}.{ns}.svc.cluster.local:1080"),
+        "note": "链接含客户端凭据（UUID/pbk），请勿公开；REALITY 私钥在服务端，这里没有也不需要。",
     }))
 }
 
@@ -1399,6 +1481,9 @@ pub fn xray_generate(req: &Request) -> Response {
         .filter(|s| !s.is_empty())
         .unwrap_or("k3s-wasm")
         .to_string();
+    // usage：cluster = 只给集群内 Pod 用（出站）；nodeport = 还要给外部/本机用（入站）
+    let usage = body["usage"].as_str().unwrap_or("cluster").to_lowercase();
+    let external = usage == "nodeport" || usage == "external";
 
     let (private_key, public_key) = reality_keypair();
     let uuid = uuid_from_bytes(&random_bytes(16));
@@ -1417,6 +1502,40 @@ pub fn xray_generate(req: &Request) -> Response {
     let server_config = build_server_config(&uuid, &private_key, &short_id, &sni, port);
     let client_config = build_client_config(&uuid, &server, &public_key, &short_id, &sni);
 
+    // 出站侧：集群里的 Pod 怎么用它（环境变量形式，直接对应面板要填的字段）
+    let outbound = json!({
+        "usage": "cluster",
+        "who": "集群内的 Pod",
+        "endpoint": "<隧道名>.<命名空间>.svc.cluster.local:1080",
+        "envForPod": {
+            "HTTP_PROXY": format!("socks5h://{socks_user}:{socks_pass}@<隧道名>.<命名空间>.svc.cluster.local:1080"),
+            "ALL_PROXY": format!("socks5h://{socks_user}:{socks_pass}@<隧道名>.<命名空间>.svc.cluster.local:1080"),
+        },
+        "curlExample": format!("curl --proxy-user '{socks_user}:{socks_pass}' --proxy socks5h://<隧道名>.<命名空间>.svc.cluster.local:1080 https://api.ipify.org"),
+        "note": "集群内客户端必须显式配代理；隧道不会自动接管集群流量。",
+    });
+
+    // 入站侧：外部/本机怎么用它（经节点 IP:NodePort）
+    let inbound = if external {
+        json!({
+            "usage": "nodeport",
+            "who": "你自己（外部经节点 IP）",
+            "service": "NodePort",
+            "endpoint": format!("socks5h://<节点IP>:<nodePort>"),
+            "curlExample": format!("curl --proxy-user '{socks_user}:{socks_pass}' --proxy socks5h://<节点IP>:<nodePort> https://api.ipify.org"),
+            // 浏览器/系统代理多数不支持 SOCKS5 账密，需要本地再串一跳
+            "localRelayExample": format!("gost -L socks5://127.0.0.1:1080 -F socks5://{socks_user}:{socks_pass}@<节点IP>:<nodePort>"),
+            "vlessForLocalClient": link.clone(),
+            "note": "建隧道时把「用途」选成 nodeport 才会生成 NodePort；并把放行来源 allowFrom 收窄到你的出口 IP。",
+        })
+    } else {
+        json!({
+            "usage": "cluster",
+            "who": "集群内（未开放外部）",
+            "note": "想要外部/本机也能用：建隧道时把「用途」选成「允许外部经节点 IP」，或先用 port-forward。",
+        })
+    };
+
     Response::ok(json!({
         // 直接填进表单的字段
         "name": name,
@@ -1429,14 +1548,19 @@ pub fn xray_generate(req: &Request) -> Response {
         "socksPass": socks_pass,
         // 私钥只在这里出现一次：它属于**服务端**，控制台不保存
         "privateKey": private_key,
+        "usage": if external { "nodeport" } else { "cluster" },
         "vlessLink": link,
         "serverConfig": server_config,
         "clientConfig": client_config,
+        // 两种方向的配置分别给出，避免"生成了但不知道给谁用"
+        "outbound": outbound,
+        "inbound": inbound,
         "notes": [
             "私钥只在本响应里出现一次，控制台不保存、不写入集群；请立刻粘到服务端配置里并妥善保管。",
             "服务端：把 serverConfig 覆盖到服务器的 config.json（或只取其 inbound），重启 xray。",
             "客户端：vlessLink 可直接导入官方客户端；clientConfig 是官方 Xray 的等价配置，便于先验证服务端。",
-            "SOCKS5 用户名/密码只用于**集群内**这条隧道的入口认证，与上面服务端配置无关。",
+            "SOCKS5 用户名/密码用于这条隧道入口的认证（集群内与外部共用同一组），与上面服务端配置无关。",
+            "入站（外部）还需要两步：建隧道时选「用途=nodeport」，并把放行来源 allowFrom 收窄到你的出口 IP。",
             "若服务端设了 minClientVer/maxClientVer，客户端上报版本需落在区间内（默认 26.3.27，可用 clientVer 覆盖）。"
         ]
     }))
