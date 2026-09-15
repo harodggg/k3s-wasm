@@ -149,6 +149,17 @@ metadata:
     app.kubernetes.io/part-of: k3s-wasm
 spec:
   type: ClusterIP
+  # ⚠️ 这里**固定**了 ClusterIP，不是随意写的。原因很硬：
+  #   wasmtime shim 不向 wasm guest 提供域名解析（wasi:sockets/ip-name-lookup 没开）。
+  #   组件若用 DNS 名（kube-api-proxy.k3s-wasm.svc.cluster.local）访问，
+  #   出站请求会**永久挂住**（实测 60s 超时且没有任何报错），而用 IP 直连 0.7s 就返回。
+  #   集群自身的 DNS 是好的（普通 Pod 能解析）—— 这是 guest 侧能力缺失。
+  #   所以这里把 ClusterIP 钉死，让组件可以写死一个稳定的 IP。
+  #
+  #   10.43.0.53 必须在 k3s 的 service CIDR 内且空闲（k3s 默认 10.43.0.0/16）。
+  #   如果你的集群用了别的 service CIDR：改这个值，并同步改
+  #   deploy/overlays/shim-only/ui-deployment.yaml 里的 K8S_PROXY_URL。
+  clusterIP: 10.43.0.53
   selector:
     app.kubernetes.io/name: kube-api-proxy
   ports:

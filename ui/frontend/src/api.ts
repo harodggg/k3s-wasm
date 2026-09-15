@@ -103,7 +103,9 @@ export interface RuntimeInfo {
   handler: string;
   isWasm: boolean;
   nodeSelector: Record<string, string>;
-  capableNodes: number;
+  /** null = 无法判定（RuntimeClass 没有 nodeSelector，装没装看标签看不出来） */
+  capableNodes: number | null;
+  selectorless: boolean;
   misconfigured: boolean;
 }
 

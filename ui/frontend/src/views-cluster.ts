@@ -224,10 +224,12 @@ export function runtimesView(): ViewInstance {
         rs.map((r) => [
           el('span', { class: 'mono', text: r.name }),
           el('span', { class: 'mono', text: r.handler }),
-          el('span', { class: 'mono', text: Object.entries(r.nodeSelector).map(([k, v]) => `${k}=${v}`).join(', ') || '（无）' }),
-          r.misconfigured
-            ? el('span', {}, badge('0', 'err'), el('span', { class: 'muted', text: ' 没有节点装了对应 shim' }))
-            : badge(String(r.capableNodes), 'ok'),
+          el('span', { class: 'mono', text: Object.entries(r.nodeSelector).map(([k, v]) => `${k}=${v}`).join(', ') || '（无 → 无法判定节点）' }),
+          r.capableNodes === null
+            ? badge('无法判定', 'muted')
+            : r.misconfigured
+              ? el('span', {}, badge('0', 'err'), el('span', { class: 'muted', text: ' 没有节点装了对应 shim' }))
+              : badge(String(r.capableNodes), 'ok'),
           r.isWasm ? badge('wasm', 'ok') : badge('普通容器', 'muted'),
         ]),
       ),

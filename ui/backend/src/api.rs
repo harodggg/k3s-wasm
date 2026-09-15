@@ -328,12 +328,14 @@ fn runtime_list(k8s: &K8s, nodes: &[Value]) -> Result<Value, ApiError> {
         .iter()
         .map(|rc| {
             let handler = rc["handler"].as_str().unwrap_or("");
+            let is_wasm = runtime_is_wasm(handler)
+                || runtime_is_wasm(rc["metadata"]["name"].as_str().unwrap_or(""));
             let node_selector = rc["scheduling"]["nodeSelector"].clone();
-            let capable = if node_selector
+            let selectorless = node_selector
                 .as_object()
                 .map(|o| o.is_empty())
-                .unwrap_or(true)
-            {
+                .unwrap_or(true);
+            let capable = if selectorless {
                 nodes.len()
             } else {
                 nodes
@@ -352,10 +354,14 @@ fn runtime_list(k8s: &K8s, nodes: &[Value]) -> Result<Value, ApiError> {
             json!({
                 "name": rc["metadata"]["name"],
                 "handler": handler,
-                "isWasm": runtime_is_wasm(handler) || runtime_is_wasm(rc["metadata"]["name"].as_str().unwrap_or("")),
+                "isWasm": is_wasm,
                 "nodeSelector": node_selector,
-                "capableNodes": capable,
-                "misconfigured": capable == 0,
+                // wasm 运行时如果**没有** nodeSelector，就无法从节点标签判断它到底装没装
+                // （k3s 会给 wasmedge/wasmer 这些也建 RuntimeClass，但节点上未必有二进制）。
+                // 这种情况返回 null，让前端显示「无法判定」，而不是编一个数字出来。
+                "capableNodes": if selectorless && is_wasm { Value::Null } else { json!(capable) },
+                "selectorless": selectorless,
+                "misconfigured": !selectorless && capable == 0,
             })
         })
         .collect();
@@ -845,7 +851,7 @@ pub fn xray_create(req: &Request) -> Response {
     let image = body["image"]
         .as_str()
         .filter(|s| !s.is_empty())
-        .unwrap_or("k3s-wasm/xray-wasm-cli:dev")
+        .unwrap_or("docker.io/k3s-wasm/xray-wasm-cli:dev")
         .to_string();
     let runtime_class = body["runtimeClassName"]
         .as_str()

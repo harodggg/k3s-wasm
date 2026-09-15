@@ -3,14 +3,17 @@
 //! 只有一层来源：环境变量 → 编译期默认值。
 //! 默认值刻意指向集群内的 kube-api-proxy，所以**标准部署不需要任何配置**。
 
-/// 集群内 kubectl proxy 的地址（见 deploy/base/kube-api-proxy.yaml）。
+/// 集群内 kubectl proxy 的地址（见 deploy/base/kube-api-proxy.yaml，ClusterIP 被固定为 10.43.0.53）。
 ///
 /// 支持在**构建时**用 `K3S_WASM_PROXY_URL` 烘焙另一个地址（`option_env!` 是编译期求值，
 /// 不是运行时读环境变量 —— 否则组件会多出一个 wasi:cli/environment 依赖，
 /// 而我们希望运行时配置尽量走容器 env）。
 pub const DEFAULT_PROXY_URL: &str = match option_env!("K3S_WASM_PROXY_URL") {
     Some(v) => v,
-    None => "http://kube-api-proxy.k3s-wasm.svc.cluster.local:8001",
+    // ⚠️ 用 IP 而不是 DNS 名：wasmtime shim 不提供 wasi:sockets/ip-name-lookup，
+    // 组件用域名访问会**永久挂住**（无报错，只是超时），IP 直连则正常。
+    // 这个 IP 与 deploy/base/kube-api-proxy.yaml 里固定的 ClusterIP 对应。
+    None => "http://10.43.0.53:8001",
 };
 
 /// 控制台默认操作的命名空间。
@@ -85,9 +88,19 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_cluster_local() {
-        assert!(DEFAULT_PROXY_URL.starts_with("http://"));
-        assert!(DEFAULT_PROXY_URL.contains(".svc.cluster.local"));
+    fn default_proxy_url_is_an_ip_literal() {
+        // 这条断言守的是一个实测约束：wasmtime shim 不向 wasm guest 提供域名解析，
+        // 用 DNS 名的出站请求会永久挂住（无报错、只是超时）。所以默认地址必须是 IP。
+        assert!(DEFAULT_PROXY_URL.starts_with("http://"), "必须是明文 HTTP：TLS 由 kube-api-proxy 承担");
+        let host = DEFAULT_PROXY_URL
+            .trim_start_matches("http://")
+            .split(':')
+            .next()
+            .unwrap_or("");
+        assert!(
+            host.parse::<std::net::Ipv4Addr>().is_ok(),
+            "默认代理地址必须是 IPv4 字面量（不能用 DNS 名），实际：{host}"
+        );
     }
 
     #[test]

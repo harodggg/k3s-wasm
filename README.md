@@ -14,22 +14,34 @@
 
 ## 已实测到什么程度（先看这张表）
 
-| 环节 | 验证方式 | 结论 |
+在一台真实的 Hetzner VM（Ubuntu 26.04 / x86_64 / 8 vCPU）上跑过完整链路：
+
+| 环节 | 验证方式 | 结果 |
 |---|---|---|
-| wasm 组件逻辑（路由 / JSON / 参数校验 / 错误处理） | 29 个原生单测 | ✅ 全绿 |
-| 组件在真实 WASI p2 宿主上跑起来 + 访问 HTTP + 读写 env + 静态资源 | **真实 Spin 4.1 宿主** + mock Kubernetes API，31 项断言 | ✅ 全绿 |
-| 组件导出的接口是否是标准 wasi:http | `wasm-tools component wit` | ✅ 只导出 `wasi:http/incoming-handler@0.2.12`，**零 `spin:*` 导入** |
-| 示例组件（`examples/hello-http`） | 真实 Spin 宿主 + curl | ✅ 200 / 404 行为正确 |
-| 部署清单能否渲染 | `kubectl kustomize`（两个 overlay） | ✅ |
-| **k3s 节点上的 containerd → shim → 运行链路** | 需要真节点 | ⚠️ **未在本环境验证**，请用 `scripts/verify-wasm-runtime.sh` 在你的集群上验 |
+| wasm 组件逻辑（路由/JSON/校验/错误处理） | 29 个原生单测 | ✅ 全绿 |
+| 组件在真实 WASI p2 宿主上（HTTP/出站/env/静态资源） | 真实 Spin 4.1 宿主 + mock K8s API，31 项断言 | ✅ 全绿 |
+| 组件导出的接口 | `wasm-tools component wit` | ✅ 只导出 `wasi:http/incoming-handler@0.2.12`，零 `spin:*` 导入 |
+| **k3s 上 containerd → shim → wasmtime（命令式组件）** | 真机 `verify --mode command` | ✅ wasm 打印 `hello, world!` / `wasi: target_os=wasi` |
+| **k3s 上 containerd → shim（HTTP 组件）** | 真机 `verify --mode http` | ✅ Pod Ready，`:8080/api/health` 正常 |
+| **控制台在 k3s 上端到端（真实 API Server）** | 真机 NodePort + 真实集群数据 | ✅ `http://<node-ip>:30081/` 200，`/api/summary` 返回真实节点/Pod/运行时 |
+| Cilium + Hubble UI | 真机 Cilium 1.20.1 | ✅ `cilium status` 全绿，`http://<node-ip>:30080/` 200（标题 `Hubble UI`） |
+| 部署清单 | `kubectl kustomize`（两个 overlay） | ✅ |
+| 本地 `wasmtime serve` 48 直接跑组件 | 本机 | ❌ 该版本 CLI 不满足 `wasi:cli/environment@0.2.12`；**不影响 k3s 上的 shim**（已在真机验证） |
 
-> 最后一行是这份交付物唯一的空白。本环境没有 k3s 节点，`containerd → shim` 这段只能在节点上验。
-> 验证脚本会把常见的失败原因（镜像没导进节点、shim 没装、nodeSelector 不匹配、镜像里没有 wasm 模块）
-> 逐项检查并打印出来。
-
----
+实测环境：k3s `v1.36.4+k3s1`、Cilium `1.20.1`（kube-proxy 替换 + Hubble UI）、
+containerd 2.x、`containerd-shim-spin-v2 v0.25.1`、`containerd-shim-wasmtime-v1 v0.6.1`。
 
 ## 快速开始
+
+**一键（在目标机器上，root）**：
+
+```bash
+git clone https://github.com/harodggg/k3s-wasm && cd k3s-wasm
+sudo ./scripts/install-k3s-cilium.sh -y      # k3s + Cilium(替换 flannel/kube-proxy) + Hubble UI + wasm 运行时
+# 结果：Hubble UI http://<node-ip>:30080/   控制台见下一步
+```
+
+想自己一步步来，或者已经有 k3s 集群：
 
 ```bash
 # ── 0. 前置（本机）─────────────────────────────────────────────
@@ -109,12 +121,14 @@ make e2e                          # 31 项端到端断言（真实 wasm 宿主�
 ```
 k3s-wasm/
 ├── scripts/
-│   ├── install-wasm-runtime.sh    # [节点] 装 shim + containerd 配置 + 标签 + RuntimeClass
+│   ├── install-k3s-cilium.sh      # [节点] 一键：k3s + Cilium + Hubble UI（可选 wasm 运行时）
+│   ├── install-wasm-runtime.sh    # [节点] 装 shim + 容器运行时配置 + 标签 + RuntimeClass
 │   ├── install-spinkube.sh        # [集群] cert-manager + RCM + spin-operator + CRD
 │   ├── build-ui.sh                # [本机] 前端 + wasm + 出包（--import/--push/--spin-push）
 │   ├── verify-wasm-runtime.sh     # [集群] 端到端验证（http / command / spinapp 三种模式）
 │   ├── e2e-local-test.sh          # [本机] 31 项断言，真实 wasm 宿主 + mock k8s API
 │   ├── dev-serve-local.sh         # [本机] 一键起本地控制台（带 mock API）
+│   ├── make-wasm-image.py         # 把 .wasm 打成 OCI 镜像（**不需要 docker**）
 │   ├── dev-mock-k8s-api.py        # 假 Kubernetes API（支持 chunked 请求体）
 │   └── lib/common.sh
 ├── deploy/
@@ -135,7 +149,7 @@ k3s-wasm/
 
 ---
 
-## 两个值得记住的坑（本仓库里已经踩过并修好）
+## 值得记住的坑（本仓库里都踩过并修好，代码/文档里有对应注释）
 
 1. **wasi-http 的 0.2.x 补丁版本互不兼容**。组件模型里每个 `0.2.N` 都是独立包版本，
    宿主只实现其中几个。用 spin-sdk 5.2 经 wit-bindgen 生成的是 `@0.2.9`，而 wasmtime 48
@@ -145,5 +159,19 @@ k3s-wasm/
 2. **`OutgoingRequest` 的 header 必须在构造时用 `Fields` 传入**，事后 `req.headers()` 是只读视图，
    `set` 会失败；而且 **body 要在 `handle()` 发起之后再写**。这两点错了的表现是
    「GET 正常、POST 全空 body」，很容易误判成代理或网络问题。
+
+3. **不要给 k3s 写 containerd runtime 模板**。k3s 的 auto-detect 已经写好
+   `runtime_type` + `BinaryName` + `SystemdCgroup`；你再在模板里声明一遍同名 runtime，
+   生成的 `config.toml` 会有两个同名 TOML 表，containerd 直接拒绝启动
+   （`toml: table spin already exists`），而 k3s 只告诉你「重启失败」。
+   只把 shim 放进 `/usr/local/bin` 即可。
+4. **wasmtime shim 不给 wasm guest 域名解析**。组件用 DNS 名访问集群内服务会**永久挂住**
+   （不报错、只是超时），用 IP 直连 0.7s 就返回。所以 `kube-api-proxy` 的 ClusterIP 被固定成
+   `10.43.0.53`，组件配置用 IP 字面量。
+5. **本地导入镜像要用完全限定名 + `k8s.io` 命名空间**。用短名（`k3s-wasm/x:dev`）导入后，
+   CRI 会「找不到」而尝试真拉取，报 `pull access denied`；`k3s ctr -n k8s.io images import`
+   才是 kubelet 看得到的地方。
+6. **k3s servicelb 在 Cilium kube-proxy 替换下是假入口**：Traefik 的 Service 有 EXTERNAL-IP，
+   但节点 80/443 根本没监听。用 NodePort（Cilium 在 BPF 里实现）—— 见 `docs/05-k3s-cilium.md`。
 
 更多报错对照见 `docs/04-troubleshooting.md`。

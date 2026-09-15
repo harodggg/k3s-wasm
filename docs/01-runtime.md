@@ -103,8 +103,16 @@ wasm-tools component wit target/wasm32-wasip2/release/k3s_wasm_ui.wasm | grep im
 | 组件行为 | 真实 Spin 4.1 宿主 + mock k8s API，31 项断言 | 全绿（含出站 HTTP、静态资源、增删改、错误路径） |
 | 示例 | `examples/hello-http` 在真实 Spin 宿主 | 200 / 404 正确 |
 | wasmtime 宿主 | `wasmtime serve` 48 | ❌ 因 `wasi:cli/environment@0.2.12` 无匹配实现而无法加载（宿主侧限制，非组件问题） |
-| k3s shim 链路 | 需真节点 | 未验证，用 `scripts/verify-wasm-runtime.sh` 在节点上验 |
+| **k3s shim 链路（命令式组件）** | 真机 k3s v1.36 + wasmtime shim v0.6.1 | ✅ 跑通 |
+| **k3s shim 链路（HTTP 组件）** | 真机 k3s v1.36 + wasmtime shim v0.6.1 | ✅ Pod Ready，`:8080` 正常响应 |
+| **控制台在 k3s 上（真实 API Server）** | 真机 NodePort + 真实集群数据 | ✅ |
 
-**推论**：Spin 宿主这条路已经实证可用（shim v0.25.1 内嵌 Spin 4.0.1，与实测的 4.1 同族）；
-wasmtime shim 那条路在接口层面成立（导出名会被它的启发式识别），但需要你在节点上确认
-它内嵌的 wasmtime 实现的 wasi-http 版本与组件一致。
+**结论（已实测）**：两条路都可用。
+- wasmtime shim（`containerd-shim-wasmtime-v1 v0.6.1`）**支持 wasi-http 0.2.12**：
+  `verify-wasm-runtime.sh --mode http` 在真机上 Pod Ready 并正确响应。
+- Spin 宿主（本地 Spin 4.1 与 shim 内嵌的 Spin 4.0.1 同族）同样可用。
+- 「本地 `wasmtime serve` 48 跑不动」是**那版 CLI** 没实现 `wasi:cli/environment@0.2.12` 的问题，
+  与 k3s 上的 shim 无关 —— 不要被它误导。
+
+⚠️ 另有一个 shim 侧的能力缺口：**wasmtime shim 不给 guest 域名解析**（未开 `ip-name-lookup`）。
+组件用 DNS 名发出站请求会永久挂住且不报错，必须用 IP 字面量。详见 `docs/05-k3s-cilium.md` §3.2。

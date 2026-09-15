@@ -16,8 +16,13 @@ namespace: k3s-wasm
 resources:
   - ../../base
   - ui-deployment.yaml
+  # 浏览器直连入口（NodePort 30081）。不需要的话删掉这一行即可。
+  - ui-nodeport.yaml
 
 images:
-  # 换成你自己的仓库地址；用 --import 直接导进 k3s containerd 时保持这个名字即可
+  # 用完全限定名：kubelet 会把短名规范化成 docker.io/...，
+  # 导入本地镜像（k3s ctr -n k8s.io images import）时如果用的是短名，
+  # CRI 会因为名字对不上而尝试真拉取，报 pull access denied。
   - name: k3s-wasm/k3s-wasm-ui
+    newName: docker.io/k3s-wasm/k3s-wasm-ui
     newTag: dev

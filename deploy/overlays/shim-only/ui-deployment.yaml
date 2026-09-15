@@ -30,16 +30,18 @@ spec:
       serviceAccountName: k3s-wasm-ui
       containers:
         - name: ui
-          image: k3s-wasm/k3s-wasm-ui:dev
+          image: docker.io/k3s-wasm/k3s-wasm-ui:dev
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 8080
           env:
+            # 必须用 IP，不能用 Service 的 DNS 名：wasmtime shim 不给 guest 域名解析能力，
+            # 用域名会让出站请求永久挂住（实测无报错、只是超时）。详见
+            # deploy/base/kube-api-proxy.yaml 里的说明与 docs/04-troubleshooting.md。
             - name: K8S_PROXY_URL
-              value: http://kube-api-proxy.k3s-wasm.svc.cluster.local:8001
-            # 只有在构建时用 K3S_WASM_PROXY_URL 烘焙过别的地址时才需要这行；
-            # 组件是「环境变量优先，其次编译期默认值」。
+              value: http://10.43.0.53:8001
+            # 该 IP 与 kube-api-proxy Service 的 spec.clusterIP 必须一致。
           readinessProbe:
             httpGet:
               path: /api/health

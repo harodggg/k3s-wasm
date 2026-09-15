@@ -19,6 +19,8 @@
 | 改了模板但「什么都没发生」 | 模板文件名/插件域写错（containerd 2.x 要 `config-v3.toml.tmpl` + `'io.containerd.cri.v1.runtime'`） | `scripts/install-wasm-runtime.sh` 会自动探测并回读确认；手工改的话见 `docs/01-runtime.md` §2 |
 | `Pod 一直 Pending`（事件里 nodeSelector 不匹配） | RuntimeClass 的 `scheduling.nodeSelector` 没有节点满足 | `kubectl label node <节点> wasm.sh/wasmtime=true`（或 `wasm.sh/spin=true`） |
 | 装完 shim 没有任何变化 | k3s 只在**启动时**探测 shim | `sudo systemctl restart k3s`（worker 节点是 `k3s-agent`） |
+| `containerd: failed to unmarshal TOML: toml: table spin already exists`（k3s 只显示「重启失败」） | 你在 containerd 模板里声明了 k3s 会自动探测的 runtime，生成了两个同名 TOML 表 | 删掉模板里重复的 runtime 段（或删模板让 auto-detect 生效）。见 `docs/05-k3s-cilium.md` §3.3 |
+| Traefik/`LoadBalancer` Service 有 EXTERNAL-IP，但节点 80/443 没监听 | k3s servicelb 靠 hostPort，而 kube-proxy 被 Cilium 替换后 hostPort 不生效 | 用 NodePort（Cilium 在 BPF 实现）。见 `docs/05-k3s-cilium.md` §3.1 |
 | 下载 shim 404 | 两个仓库的资产命名风格不同：spin 是 `containerd-shim-spin-v2-linux-x86_64.tar.gz`，runwasi 是 `containerd-shim-wasmtime-x86_64-linux-musl.tar.gz` | 见 `scripts/install-wasm-runtime.sh` 里的 `spin_asset()` / `wasmtime_asset()` |
 | Pod 指标不准 | runwasi 默认 cgroupfs，与 systemd cgroup driver 不一致 | 配置里加 `SystemdCgroup = true`（安装脚本已做） |
 
@@ -29,6 +31,11 @@
 | GET 正常，POST body 为空（k8s 回 `resource name may not be empty`，或 mock 回 422） | `OutgoingRequest` 的 header/body 用法不对：header 必须在 `OutgoingRequest::new(Fields::from_list(...))` 时传入；body 必须在 `handle()` **之后**写 | 见 `ui/backend/src/k8s.rs` 里 `send()` 的注释与顺序 |
 | `设置请求头 content-type 失败` | 用 `req.headers().set(...)` 改已构造请求的 header —— 那是只读视图 | 同上，构造时传入 |
 | `访问 kube-api-proxy 失败：... PermissionDenied` / `outbound host not allowed` | 出站被宿主拒绝：wasmtime 缺 `-S inherit-network=y`，或 Spin 的 `allowed_outbound_hosts` 没放行 | wasmtime 加 `-S http=y -S inherit-network=y`；Spin 在 `spin.toml` 里放行对应 host |
+| 出站请求**永久挂住**（无报错，只是超时），用 IP 直连却正常 | wasmtime shim 不向 guest 提供域名解析（`wasi:sockets/ip-name-lookup` 未开） | 用 IP 字面量：把代理 Service 的 ClusterIP 固定下来（本仓库固定为 10.43.0.53） |
+| `pull access denied ... repository does not exist` 但镜像明明在本地 | 三个常见原因：① 导入到了默认命名空间而不是 `k8s.io` ② 导入用短名、Pod 用 `docker.io/` 全名（或反之），CRI 名字对不上 ③ `imagePullPolicy: Always` | `k3s ctr -n k8s.io images import <tar>`，且镜像名统一用完全限定名 `docker.io/...` |
+| `ctr: wrong diff id "sha256:..." calculated on extraction "sha256:..."` | 自己构造 OCI 镜像时把 gzip 层的 `diff_ids` 写成了压缩后字节的摘要 | 层描述符 digest 用**压缩后**、`rootfs.diff_ids` 用**解压后** tar 的摘要（`scripts/make-wasm-image.py` 里有注释） |
+| 刚建完命名空间，组件出站请求挂住，几秒后自己好了 | Cilium 的 BPF 策略/conntrack 对新建的 NetworkPolicy 与 Pod IP 需要几秒铺开 | 重试即可；`verify-wasm-runtime.sh` 已内置最多 60s 的重试 |
+| 改了组件代码、重新导入了镜像，但行为没变 | 镜像 tag 是可变 tag（`:dev`）且 `imagePullPolicy: IfNotPresent`，Pod spec 没变就不会重建 | `kubectl -n k3s-wasm rollout restart deploy/k3s-wasm-ui`；或每次构建用唯一 tag |
 | `Kubernetes API 返回 403（Forbidden）` | ClusterRole 权限不足 | 报错里带着 k8s 原文（哪个资源、哪个动词），照它加 `deploy/base/kube-api-proxy.yaml` 里的 rules |
 | UI 显示「kube-api-proxy 地址用的是编译期默认值」 | 没有设置 `K8S_PROXY_URL`，正在用默认的 in-cluster 地址 | 标准部署无需处理；非标准命名空间设 env 或构建时烘焙 |
 | 前端白屏，页面显示「前端资源未构建」 | 构建 wasm 时 `ui/frontend/dist` 不存在（build.rs 写入了占位页） | `cd ui/frontend && npm ci && npm run build`，再重新 `cargo build --release --target wasm32-wasip2`；或用 `make ui` |

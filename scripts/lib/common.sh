@@ -72,11 +72,13 @@ detect_arch() {
     esac
 }
 
-# k3s 是否以 systemd 服务运行
+# k3s 是否以 systemd 服务运行。
+# 用 `systemctl cat` 而不是 grep list-unit-files：后者的输出格式/对齐会变，
+# 在 Ubuntu 26.04 上就出现过「明明有 k3s.service 却 grep 不到」的误报。
 k3s_service_name() {
-    if systemctl list-unit-files 2>/dev/null | grep -q '^k3s\.service'; then
+    if systemctl cat k3s.service >/dev/null 2>&1; then
         echo k3s
-    elif systemctl list-unit-files 2>/dev/null | grep -q '^k3s-agent\.service'; then
+    elif systemctl cat k3s-agent.service >/dev/null 2>&1; then
         echo k3s-agent
     else
         echo ""
@@ -147,3 +149,10 @@ github_latest_tag() {
     curl -fsSL --max-time 10 "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
         | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/'
 }
+
+# 在 k3s 节点上，k3s 把 kubeconfig 放在 /etc/rancher/k3s/k3s.yaml，
+# 而 kubectl/helm 默认找 ~/.kube/config —— 不指过去就会出现
+#「k3s kubectl 正常、kubectl 报 connection refused」这种莫名其妙的差异。
+if [ -z "${KUBECONFIG:-}" ] && [ -r /etc/rancher/k3s/k3s.yaml ]; then
+    export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+fi

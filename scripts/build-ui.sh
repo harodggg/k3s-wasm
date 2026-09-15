@@ -28,7 +28,9 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/lib/common.sh"
 
 MODE="build"
-IMAGE="${IMAGE:-k3s-wasm/k3s-wasm-ui:dev}"
+# ⚠️ 默认用完全限定名：kubelet 会把 `k3s-wasm/x` 规范化成 `docker.io/k3s-wasm/x`，
+# 如果导入时用的是短名，CRI 侧会「找不到镜像」而去真的拉取，报 pull access denied。
+IMAGE="${IMAGE:-docker.io/k3s-wasm/k3s-wasm-ui:dev}"
 SKIP_FRONTEND=0
 
 usage() {
@@ -123,7 +125,7 @@ EOF
             have k3s || die "本机没有 k3s，无法 --import；请用 --push 推到仓库"
             log "导入 k3s 的 containerd（不经过镜像仓库）"
             docker save "$IMAGE" | k3s ctr images import - >/dev/null
-            ok "已导入。记得 Pod 里写 imagePullPolicy: Never 或 IfNotPresent"
+            ok "已导入（k8s.io 命名空间）。Pod 里用完全限定名 docker.io/...，imagePullPolicy: IfNotPresent"
             info "部署：kubectl apply -k deploy/overlays/shim-only"
         else
             log "推送 $IMAGE"

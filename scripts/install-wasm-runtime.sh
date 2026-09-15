@@ -16,10 +16,15 @@
 #   而 /var/lib/rancher/k3s/data/current/bin 不是 —— 那是 k3s 自己的版本化载荷目录，
 #   不在搜索路径里，升级就变。
 #
-#   那为什么还要写模板？为了 `SystemdCgroup = true`：
-#   runwasi 系 shim 默认走 cgroupfs，与 k3s 的 systemd cgroup driver 不一致时
-#   Pod 指标会不准。auto-detect 生成的 stanza 不带这个选项，所以要显式写。
-#   不想动模板可以加 --no-template（只靠 auto-detect）。
+#   ⚠️ 关于模板：**默认不写**。k3s 的 auto-detect 生成的 stanza 已经包含
+#      runtime_type、BinaryName 和 SystemdCgroup = true，够用且正确。
+#      反过来，如果你在模板里再声明一遍同名 runtime，生成出来的 config.toml 会有
+#      两个同名 TOML 表 —— containerd 直接拒绝启动，报：
+#        containerd: failed to unmarshal TOML: toml: table spin already exists
+#      而 k3s 的表现只是「重启失败」，很容易误判成 shim 的问题。
+#      只有当你把 shim 装到了 k3s 搜索路径之外（--bin-dir /opt/...）时，
+#      auto-detect 探测不到，才需要用 --template 显式写。（脚本会自动判断并在
+#      会撞表时拒绝执行。）
 #
 #   ⚠️ containerd 2.x 的插件域是 `io.containerd.cri.v1.runtime`，模板文件名是
 #      config-v3.toml.tmpl；1.7 及更早才是 config.toml.tmpl + io.containerd.grpc.v1.cri。
@@ -60,7 +65,7 @@ MARK_END="# <<< k3s-wasm managed block <<<"
 SHIMS="spin,wasmtime"
 ACTION="install"
 NO_RESTART=0
-WRITE_TEMPLATE=1
+WRITE_TEMPLATE=""   # ""=自动（仅当 k3s 探测不到时）/ 1=强制 / 0=禁止
 APPLY_RUNTIMECLASSES=1
 FORCE_TMPL=0
 NODE_LABEL="${K3S_WASM_LABEL:-}"
@@ -93,6 +98,7 @@ while [ $# -gt 0 ]; do
         --wasmtime-tag)     WASMTIME_SHIM_TAG="${2:?}"; shift 2 ;;
         --bin-dir)          SHIM_BIN_DIR="${2:?}"; shift 2 ;;
         --no-template)      WRITE_TEMPLATE=0; shift ;;
+        --template)         WRITE_TEMPLATE=1; shift ;;
         --no-restart)       NO_RESTART=1; shift ;;
         --no-runtimeclass)  APPLY_RUNTIMECLASSES=0; shift ;;
         --label)            NODE_LABEL="${2:?}"; shift 2 ;;
@@ -284,8 +290,81 @@ ${MARK_END}
 EOF
 }
 
+# shim 是否落在 k3s 会搜索的 PATH 里（k3s 文档列的这几个目录）
+shim_in_k3s_path() {
+    local d
+    for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do
+        [ -x "$d/$1" ] && return 0
+    done
+    return 1
+}
+
+# 移除历史托管块。返回 0 表示确实移除了东西。
+remove_managed_block() {
+    local removed=1 tmpl
+    for tmpl in "$K3S_AGENT_DIR/config-v3.toml.tmpl" "$K3S_AGENT_DIR/config.toml.tmpl"; do
+        [ -f "$tmpl" ] || continue
+        grep -qF "$MARK_BEGIN" "$tmpl" || continue
+        if [ "$DRY_RUN" = 1 ]; then
+            info "[dry-run] 从 $tmpl 移除托管块"
+        else
+            cp -a "$tmpl" "$tmpl.bak.$(date +%Y%m%d%H%M%S)"
+            awk -v b="$MARK_BEGIN" -v e="$MARK_END" '
+                $0==b {skip=1}
+                skip==0 {print}
+                $0==e {skip=0}
+            ' "$tmpl" >"$tmpl.new"
+            mv "$tmpl.new" "$tmpl"
+            # 只剩 base 调用的模板没有存在意义，删掉它（连同生成的 config.toml，
+            # 让 k3s 按内置默认重新生成一份干净的）
+            if ! grep -qvE '^\s*(#|$|\{\{ template "base" \. \}\})' "$tmpl"; then
+                rm -f "$tmpl" "$K3S_AGENT_DIR/config.toml"
+                info "模板已空，删除 $tmpl 与生成的 config.toml（k3s 会重新生成）"
+            fi
+        fi
+        removed=0
+    done
+    return "$removed"
+}
+
 install_containerd_config() {
-    [ "$WRITE_TEMPLATE" = 1 ] || { warn "按 --no-template 跳过模板；SystemdCgroup 不会设置"; return 0; }
+    # 决定是否需要模板
+    local needs_template=0
+    if [ "$WRITE_TEMPLATE" = 1 ]; then
+        needs_template=1
+    elif [ "$WRITE_TEMPLATE" = 0 ]; then
+        needs_template=0
+    else
+        if has_shim spin && ! shim_in_k3s_path containerd-shim-spin-v2; then needs_template=1; fi
+        if has_shim wasmtime && ! shim_in_k3s_path containerd-shim-wasmtime-v1; then needs_template=1; fi
+    fi
+
+    # 先清理历史托管块（老版本脚本写过，留着就会撞表）
+    remove_managed_block && info "已清理旧的托管块"
+
+    if [ "$needs_template" = 0 ]; then
+        ok "不改 containerd 配置：k3s 会自动探测 PATH 里的 shim"
+        info "auto-detect 生成的 stanza 已含 runtime_type + BinaryName + SystemdCgroup，无需手工补"
+        return 0
+    fi
+
+    # 需要模板：先做撞表检查 —— 这正是让 containerd 起不来的那个坑
+    local conflict=0
+    if has_shim spin && shim_in_k3s_path containerd-shim-spin-v2; then
+        err "冲突：containerd-shim-spin-v2 在 k3s 的搜索路径里，k3s 会自动声明 runtime \"spin\"，"
+        err "      模板若再声明一次会产生同名 TOML 表，containerd 将拒绝启动。"
+        conflict=1
+    fi
+    if has_shim wasmtime && shim_in_k3s_path containerd-shim-wasmtime-v1; then
+        err "冲突：containerd-shim-wasmtime-v1 在 k3s 的搜索路径里，理由同上。"
+        conflict=1
+    fi
+    if [ "$conflict" = 1 ]; then
+        die "已中止，避免把节点搞成 containerd 起不来。
+     两种正确做法：
+       1) 把 shim 放到 /usr/local/bin（推荐）→ 交给 auto-detect，不要用 --template
+       2) 保持 shim 在自定义目录（如 /opt）→ 用 --template，此时 auto-detect 探测不到，不会冲突"
+    fi
 
     local ver plugin_domain tmpl
     ver="$(detect_containerd_config_version)"
@@ -296,7 +375,7 @@ install_containerd_config() {
         tmpl="$K3S_AGENT_DIR/config.toml.tmpl"
         plugin_domain='"io.containerd.grpc.v1.cri"'
     fi
-    info "探测到 containerd 配置世代：${ver}（模板 ${tmpl}）"
+    info "探测到 containerd 配置世代：$ver（模板 $tmpl）"
 
     local block; block="$(managed_block "$plugin_domain")"
 
@@ -307,12 +386,9 @@ install_containerd_config() {
     fi
 
     install -d -m 0755 "$K3S_AGENT_DIR"
-
     if [ ! -f "$tmpl" ]; then
-        # 必须调用 {{ template "base" . }}，否则 k3s 的默认 CRI 配置会全部丢失。
-        # k3s 官方建议「基于 base 模板扩展」，而不是把 config.toml 拷成模板再改。
         {
-            printf '# 由 k3s-wasm 生成。\n'
+            printf '# 由 k3s-wasm 生成（仅在 shim 不在 k3s 搜索路径时使用）。\n'
             printf '{{ template "base" . }}\n\n'
             printf '%s\n' "$block"
         } >"$tmpl"
@@ -321,26 +397,12 @@ install_containerd_config() {
     fi
 
     if ! grep -qF '{{ template "base" . }}' "$tmpl"; then
-        if [ "$FORCE_TMPL" != 1 ]; then
-            die "$tmpl 已存在但没有 {{ template \"base\" . }}。
-     直接追加会丢掉 k3s 默认配置。请把这一行放到文件首行，或加 --force-template 强制继续。"
-        fi
+        [ "$FORCE_TMPL" = 1 ] || die "$tmpl 已存在但没有 {{ template \"base\" . }}，加 --force-template 才能继续"
         warn "模板缺少 base 调用，按 --force-template 继续"
     fi
-
     cp -a "$tmpl" "$tmpl.bak.$(date +%Y%m%d%H%M%S)"
-    if grep -qF "$MARK_BEGIN" "$tmpl"; then
-        awk -v b="$MARK_BEGIN" -v e="$MARK_END" -v block="$block" '
-            $0==b {print block; skip=1}
-            skip==0 {print}
-            $0==e {skip=0}
-        ' "$tmpl" >"$tmpl.new"
-        mv "$tmpl.new" "$tmpl"
-        ok "托管块已更新"
-    else
-        printf '\n%s\n' "$block" >>"$tmpl"
-        ok "托管块已追加"
-    fi
+    printf '\n%s\n' "$block" >>"$tmpl"
+    ok "托管块已追加（保留原有内容）"
 }
 
 # ════════════════════════════════════════════════════════════════════
@@ -435,16 +497,40 @@ restart_k3s() {
     warn "等了 120s 仍未 Ready，检查：journalctl -u $K3S_SERVICE -n 200"
 }
 
-# 重启后回读 k3s 生成的 config.toml，确认 runtime 真的注册进去了。
+# 用 k3s 自带的 containerd 直接加载生成的配置：能 dump 出来就说明 TOML 与插件声明没问题。
+# 这一步是「节点会不会被搞坏」的分水岭 —— 配置写错时 containerd 会拒绝启动，
+# 而 k3s 只会给你一句「重启失败」。
+validate_containerd_config() {
+    local cfg="$K3S_AGENT_DIR/config.toml" ctr
+    [ -r "$cfg" ] || return 0
+    ctr="/var/lib/rancher/k3s/data/current/bin/containerd"
+    [ -x "$ctr" ] || ctr="$(command -v containerd || true)"
+    if [ -z "$ctr" ]; then
+        info "找不到 containerd 二进制，跳过配置校验"
+        return 0
+    fi
+    if out="$("$ctr" --config "$cfg" config dump 2>&1 >/dev/null)"; then
+        ok "containerd 能正常加载生成的配置"
+        return 0
+    fi
+    err "containerd 加载配置失败："
+    printf '%s\n' "$out" | head -5 | sed 's/^/    /'
+    err "这是硬错误：containerd 起不来，k3s 就不会 Ready。"
+    return 1
+}
+
+# 回读 k3s 生成的 config.toml，确认 runtime 真的注册进去了。
 # 这一步很值：模板文件名/插件域写错时的现象就是「静默不生效」。
 verify_containerd_config() {
     local cfg="$K3S_AGENT_DIR/config.toml"
     [ -f "$cfg" ] || return 0
+    validate_containerd_config || true
     local missing=0
-    if has_shim spin && ! grep -q 'runtimes\.spin' "$cfg"; then
+    # 注意引号：k3s 生成的是 runtimes.'spin'（带引号），早期我写成 runtimes\.spin 会误报
+    if has_shim spin && ! grep -qE "runtimes\.'?spin'?\]" "$cfg"; then
         warn "config.toml 里没有 spin runtime —— 模板可能写错了文件名/插件域"; missing=1
     fi
-    if has_shim wasmtime && ! grep -q 'runtimes\.wasmtime' "$cfg"; then
+    if has_shim wasmtime && ! grep -qE "runtimes\.'?wasmtime'?\]" "$cfg"; then
         warn "config.toml 里没有 wasmtime runtime —— 同上"; missing=1
     fi
     if [ "$missing" = 0 ]; then
