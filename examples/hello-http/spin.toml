@@ -1,0 +1,21 @@
+# Spin 应用清单。这个示例同时也能被 wasmtime shim 直接跑，
+# 所以 spin.toml 只是「给 Spin 宿主看的那一份描述」，不是必需文件。
+spin_manifest_version = 2
+
+[application]
+name = "hello-http"
+version = "0.1.0"
+description = "最小 wasi:http/proxy 组件示例"
+authors = ["k3s-wasm"]
+
+[[trigger.http]]
+route = "/..."
+component = "hello-http"
+
+[component.hello-http]
+source = "target/wasm32-wasip2/release/hello_http.wasm"
+# 这个示例不做任何出站请求，所以这里空着（越紧越好）
+allowed_outbound_hosts = []
+
+[component.hello-http.build]
+command = "cargo build --release --target wasm32-wasip2"

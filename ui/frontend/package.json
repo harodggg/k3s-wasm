@@ -1,0 +1,16 @@
+{
+  "name": "k3s-wasm-ui-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "k3s WASM 控制台前端：无框架、零运行时依赖，构建产物编译期嵌入 wasm 后端",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 4173"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}

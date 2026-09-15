@@ -1,0 +1,26 @@
+# overlays/spinkube —— 把控制台作为一个 SpinApp 交给 SpinKube 管。
+#
+# 与 shim-only 的区别：
+#   · 工作负载是 SpinApp CRD，由 spin-operator 生成 Deployment + Service
+#   · runtimeClassName 来自 SpinAppExecutor（executor 里配 wasmtime-spin-v2），
+#     所以 SpinApp 自己不写 runtimeClassName（那是无效字段）
+#   · Spin shim 里应用监听 **80** 端口（不是 wasmtime shim 的 8080），
+#     operator 创建的 Service 就是 80 → 命名端口 http-app
+#
+# 先决条件：scripts/install-spinkube.sh（装 RCM + operator + CRD + 默认 executor）
+# 镜像要求：本组件在 Spin 宿主下已实测可跑（见 docs/01-runtime.md 的验证矩阵），
+#          镜像用 `spin registry push --build` 产出。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: k3s-wasm
+
+resources:
+  - ../../base
+  - spinappexecutor.yaml
+  - spinapp.yaml
+
+# base 里的 Service 与 operator 自动创建的同名 Service 冲突，这里删掉它，
+# 由 operator 创建（port 80 → http-app）。
+patches:
+  - path: delete-ui-service.yaml

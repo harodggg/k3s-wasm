@@ -1,0 +1,39 @@
+# 控制台自身，以 SpinApp 形式交给 SpinKube。
+#
+# 注意：
+#   · 没有 spec.runtimeClassName —— 它来自 executor（见 spinappexecutor.yaml）
+#   · 没有 spec.probes —— 探针字段叫 spec.checks.<readiness|liveness>.httpGet
+#   · 没有 spec.annotations —— 注解分 podAnnotations / deploymentAnnotations / serviceAnnotations
+#   · 探针路径用 /api/health：组件会真的去问 kube-api-proxy，
+#     所以这个探针同时验证了「组件 → 代理 → API Server」这条链路
+apiVersion: core.spinkube.dev/v1alpha1
+kind: SpinApp
+metadata:
+  name: k3s-wasm-ui
+  namespace: k3s-wasm
+spec:
+  image: k3s-wasm/k3s-wasm-ui:dev
+  executor: containerd-shim-spin
+  replicas: 1
+  # operator 会把这两个标签打到 Pod 上，于是 base 里的 Service/NetworkPolicy 选择器依然有效
+  podLabels:
+    app.kubernetes.io/name: k3s-wasm-ui
+    app.kubernetes.io/part-of: k3s-wasm
+  checks:
+    readiness:
+      httpGet:
+        path: /api/health
+      initialDelaySeconds: 2
+      periodSeconds: 5
+      failureThreshold: 6
+    liveness:
+      httpGet:
+        path: /api/health
+      initialDelaySeconds: 10
+      periodSeconds: 20
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi

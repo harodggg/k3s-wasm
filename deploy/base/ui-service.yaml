@@ -1,0 +1,32 @@
+# 控制台的 ServiceAccount 与 Service。
+#
+# 注意：控制台 Pod 自己**不需要**任何 Kubernetes API 权限 ——
+# 所有 API 调用都是组件通过 kube-api-proxy（另一个 SA）发出去的。
+# 这里的 SA 只是为了不用 default SA（最小权限原则 + 便于审计）。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: k3s-wasm-ui
+  namespace: k3s-wasm
+  labels:
+    app.kubernetes.io/name: k3s-wasm-ui
+    app.kubernetes.io/part-of: k3s-wasm
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k3s-wasm-ui
+  namespace: k3s-wasm
+  labels:
+    app.kubernetes.io/name: k3s-wasm-ui
+    app.kubernetes.io/part-of: k3s-wasm
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: k3s-wasm-ui
+  ports:
+    # 对外统一 80，容器里是 8080（wasmtime shim 的默认监听端口，见下面的 Deployment）
+    - name: http
+      port: 80
+      targetPort: 8080

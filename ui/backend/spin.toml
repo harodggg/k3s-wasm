@@ -1,0 +1,37 @@
+# Spin 应用清单（manifest v2）。
+#
+# 说明：本组件没有任何 `spin:*` 导入（`wasm-tools component wit` 可查），
+# 就是一个标准 `wasi:http/proxy` 组件。默认部署路径因此是
+# containerd-shim-wasmtime（RuntimeClass wasmtime-wasip2，容器内 :8080），
+# 不需要这份清单。
+#
+# 这份清单用于 **SpinKube / Spin 宿主**那条可选路径：
+#   · 本地验证：`spin up --listen 127.0.0.1:8080`（实测可用，见 README 验证矩阵）
+#   · 出包：`./scripts/build-ui.sh --spin-push <repo>:<tag>` → SpinApp 镜像
+# 注意 Spin 宿主下应用监听 **80**（wasmtime shim 是 8080）。
+spin_manifest_version = 2
+
+[application]
+name = "k3s-wasm-ui"
+version = "0.1.0"
+description = "k3s WASM 控制台：用 wasm 工作负载管理 wasm 工作负载"
+authors = ["k3s-wasm"]
+
+# "/..." 是 Spin 的全捕获路由：所有路径都进这一个组件，
+# 组件内部再用 Router 分流 /api/* 与静态资源。
+[[trigger.http]]
+route = "/..."
+component = "k3s-wasm-ui"
+
+[component.k3s-wasm-ui]
+source = "target/wasm32-wasip2/release/k3s_wasm_ui.wasm"
+# ⚠️ 只放行**明文 HTTP**：TLS 与认证由集群内的 kube-api-proxy 承担。
+# 想收紧就把下面换成具体的集群内地址，例如
+#   ["http://kube-api-proxy.k3s-wasm.svc.cluster.local:8001"]
+# 收得太紧而忘了改 K8S_PROXY_URL，表现是组件里报 "outbound host not allowed"。
+allowed_outbound_hosts = ["http://*:*"]
+
+[component.k3s-wasm-ui.build]
+# 注意：**不要**在这里加 CARGO_TARGET_DIR 覆盖，
+# source 路径是相对 app 目录写死的。
+command = "cargo build --release --target wasm32-wasip2"

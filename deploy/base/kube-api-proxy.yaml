@@ -1,0 +1,177 @@
+# ─────────────────────────────────────────────────────────────────────
+# kube-api-proxy —— 让 wasm 组件用「明文 HTTP」访问 Kubernetes API。
+#
+# 为什么需要它（这是个刻意做的取舍，不是偷懒）：
+#   wasm32-wasip2 组件里的出站 HTTPS 由宿主（Spin shim 内的 Spin 运行时 /
+#   wasmtime + wasi:http）完成 TLS。k3s 默认给 API Server 签的是**集群自签 CA**，
+#   而宿主的信任根不在我们手里配置，于是直连 https://kubernetes.default.svc
+#   会遇到证书校验失败，且几乎没有可用的出口去注入自定义 CA。
+#
+#   所以这里放一个 kubectl proxy：它用 Pod 的 ServiceAccount 去和 API Server 做
+#   带认证的 TLS，对集群内暴露一个**明文 HTTP** 端点。wasm 组件只讲 HTTP，
+#   把 TLS/证书/Token 全部留在组件之外 —— 这也正好符合 wasm 的能力最小化思路。
+#
+# 安全边界（务必读）：
+#   1. 这个 Service 在集群内是**无认证**的，谁能访问它，谁就拥有下面 ClusterRole
+#      里的全部权限（等于一个集群管理员入口）。
+#   2. 因此下面配套了 NetworkPolicy，只允许控制台 Pod 访问它。
+#      k3s 自带 network policy controller，NetworkPolicy 是生效的。
+#   3. 不需要它的话，把本文件从 kustomization.yaml 里去掉，并给控制台设置
+#      K8S_DIRECT=1 + KUBE_TOKEN/KUBE_CA_CERT（见 docs/02-ui.md 的「直连模式」）。
+# ─────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-api-proxy
+  namespace: k3s-wasm
+  labels:
+    app.kubernetes.io/name: kube-api-proxy
+    app.kubernetes.io/part-of: k3s-wasm
+---
+# 控制台要展示/操作的东西，全部在这里显式列出。
+# 权限给的是「运维控制台」的量级：能看能改工作负载，但不碰 secret 内容。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k3s-wasm-console
+  labels:
+    app.kubernetes.io/part-of: k3s-wasm
+rules:
+  # 概览：节点与命名空间
+  - apiGroups: [""]
+    resources: ["nodes", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  # 工作负载视图 + 日志
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "events", "configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  # 扩缩容与下发
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale"]
+    verbs: ["get", "update", "patch"]
+  # 创建/删除 xray 隧道这类工作负载
+  - apiGroups: [""]
+    resources: ["configmaps", "services"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "update", "patch", "delete"]
+  # RuntimeClass 列表（控制台要显示哪些 wasm 运行时可用）
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    verbs: ["get", "list", "watch"]
+  # SpinKube 的 SpinApp CRD（装了 SpinKube 才有；没装时这几条规则无副作用）
+  - apiGroups: ["core.spinkube.dev"]
+    resources: ["spinapps", "spinappexecutors"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # 注意：**故意不给** secrets 权限。控制台只展示变量的键名，不读值。
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: k3s-wasm-console
+  labels:
+    app.kubernetes.io/part-of: k3s-wasm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: k3s-wasm-console
+subjects:
+  - kind: ServiceAccount
+    name: kube-api-proxy
+    namespace: k3s-wasm
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-api-proxy
+  namespace: k3s-wasm
+  labels:
+    app.kubernetes.io/name: kube-api-proxy
+    app.kubernetes.io/part-of: k3s-wasm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-api-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kube-api-proxy
+        app.kubernetes.io/part-of: k3s-wasm
+    spec:
+      serviceAccountName: kube-api-proxy
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: proxy
+          # 官方镜像，多架构。版本只影响 kubectl 自身，不必与集群版本严格一致。
+          image: registry.k8s.io/kubectl:v1.33.0
+          args:
+            - proxy
+            - --address=0.0.0.0
+            - --port=8001
+            - --accept-hosts=.*
+          ports:
+            - name: http
+              containerPort: 8001
+          readinessProbe:
+            tcpSocket:
+              port: 8001
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-api-proxy
+  namespace: k3s-wasm
+  labels:
+    app.kubernetes.io/name: kube-api-proxy
+    app.kubernetes.io/part-of: k3s-wasm
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kube-api-proxy
+  ports:
+    - name: http
+      port: 8001
+      targetPort: 8001
+---
+# 只允许控制台 Pod 进 8001。这是上面「安全边界」第 2 条的具体手段。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kube-api-proxy-lockdown
+  namespace: k3s-wasm
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kube-api-proxy
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: k3s-wasm-ui
+      ports:
+        - protocol: TCP
+          port: 8001

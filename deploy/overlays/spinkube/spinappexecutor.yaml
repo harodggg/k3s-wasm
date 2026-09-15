@@ -1,0 +1,23 @@
+# SpinAppExecutor：决定 SpinApp 怎么落地成 Pod。
+#
+# 关键点（都是容易写错的地方）：
+#   · spec.createDeployment 是**必填**的，字段名不是 spec.deployment
+#   · runtimeClassName 配在 executor 上，不在 SpinApp 上
+#   · 这个对象是**命名空间级**的，必须和 SpinApp 在同一个命名空间
+#   · 名字 containerd-shim-spin 与官方 spin-operator.shim-executor.yaml 保持一致
+apiVersion: core.spinkube.dev/v1alpha1
+kind: SpinAppExecutor
+metadata:
+  name: containerd-shim-spin
+  namespace: k3s-wasm
+spec:
+  createDeployment: true
+  deploymentConfig:
+    # 与 scripts/install-wasm-runtime.sh 创建的 RuntimeClass 对应（handler spin）
+    #
+    # ⚠️ 如果你是用 scripts/install-spinkube.sh 走的 RCM 路线，
+    #    RCM 创建的 RuntimeClass 名字相同但 handler 是 **spin-v2**；
+    #    两条路线不要同时用，否则同名 RuntimeClass 会被互相覆盖。
+    runtimeClassName: wasmtime-spin-v2
+    # 让 Spin 运行时带上默认 CA 证书（将来要直连 HTTPS 时有用）
+    installDefaultCACerts: true

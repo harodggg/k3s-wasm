@@ -1,0 +1,90 @@
+name: ci
+
+# 只跑「本机能验」的部分。k3s 节点上的 containerd → shim 链路 CI 里没有，
+# 那是 scripts/verify-wasm-runtime.sh 的职责（需要在真集群跑）。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust（含 wasm32-wasip2）
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add wasm32-wasip2
+
+      - name: 缓存 cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+
+      - name: 原生单测（29 个：路由 / JSON 形态 / 参数校验 / 解析）
+        working-directory: ui/backend
+        run: cargo test --locked
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: ui/frontend/package-lock.json
+
+      - name: 构建前端
+        working-directory: ui/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: 构建 wasm 后端（wasm32-wasip2，嵌入真实前端）
+        working-directory: ui/backend
+        run: |
+          cargo build --release --locked --target wasm32-wasip2
+          ls -la target/wasm32-wasip2/release/k3s_wasm_ui.wasm
+
+      - name: 安装 wasm-tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-tools
+
+      - name: 校验组件接口（导出 wasi:http/incoming-handler，且无 spin:* 导入）
+        working-directory: ui/backend
+        run: |
+          set -euo pipefail
+          WIT="$(wasm-tools component wit target/wasm32-wasip2/release/k3s_wasm_ui.wasm)"
+          printf '%s\n' "$WIT" | grep -q 'export wasi:http/incoming-handler'
+          if printf '%s\n' "$WIT" | grep -q 'import spin:'; then
+            echo "组件不应有 spin:* 导入 —— 那会让它绑死在 Spin 宿主上"; exit 1
+          fi
+          echo "$WIT" | grep -E 'import|export'
+
+      - name: 示例也能编
+        run: |
+          cargo build --release --locked --manifest-path examples/hello-http/Cargo.toml --target wasm32-wasip2
+          cargo build --release --locked --manifest-path examples/hello-wasip2/Cargo.toml --target wasm32-wasip2
+
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 渲染两个 overlay（能渲染就说明 YAML 与 kustomize 结构没问题）
+        run: |
+          curl -fsSL -o /tmp/kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x /tmp/kubectl
+          /tmp/kubectl kustomize deploy/overlays/shim-only >/dev/null
+          /tmp/kubectl kustomize deploy/overlays/spinkube >/dev/null
+          echo "两个 overlay 渲染通过"
+
+      - name: shell / python 语法
+        run: |
+          for f in scripts/*.sh scripts/lib/*.sh; do bash -n "$f"; done
+          python3 -c "import ast,sys; ast.parse(open('scripts/dev-mock-k8s-api.py').read())"
+          echo "语法检查通过"

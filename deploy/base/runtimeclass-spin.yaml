@@ -1,0 +1,22 @@
+# SpinKube / containerd-shim-spin 对应的 RuntimeClass。
+#
+# ⚠️ 前提：该节点已经装了 containerd-shim-spin-v2，并且 containerd 配置里注册了
+#          [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.spin]
+#          见 scripts/install-wasm-runtime.sh。
+#
+# handler 必须与 containerd 配置里的 runtime 名（.runtimes.<NAME>）一致。
+#
+# scheduling.nodeSelector 很关键：RuntimeClass 是集群级的，但运行时二进制是节点级的。
+# 没有它，调度器可能把 wasm Pod 扔到没装 shim 的节点上，报错是
+# "failed to create shim task: no runtime for io.containerd.spin.v2 is configured"
+# ——很难看出根因。节点标签由安装脚本自动打上。
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: wasmtime-spin-v2
+  labels:
+    app.kubernetes.io/part-of: k3s-wasm
+handler: spin
+scheduling:
+  nodeSelector:
+    wasm.sh/spin: "true"

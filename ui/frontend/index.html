@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>k3s WASM 控制台</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2354c1ff'/%3E%3Ctext x='16' y='22' font-size='15' font-family='monospace' text-anchor='middle' fill='%230b1020'%3EW%3C/text%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <div id="app" class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">W</span>
+          <div>
+            <div class="brand-title">k3s WASM</div>
+            <div class="brand-sub">wasm32-wasip2 控制台</div>
+          </div>
+        </div>
+        <nav id="nav" class="nav"></nav>
+        <div class="sidebar-foot">
+          <div id="conn" class="conn">连接中…</div>
+          <label class="toggle">
+            <input type="checkbox" id="autorefresh" checked />
+            <span>自动刷新（5s）</span>
+          </label>
+        </div>
+      </aside>
+      <main class="main">
+        <header class="topbar">
+          <h1 id="view-title">概览</h1>
+          <div class="topbar-right">
+            <span id="last-updated" class="muted"></span>
+            <button id="refresh" class="btn" title="立即刷新">刷新</button>
+          </div>
+        </header>
+        <div id="banner" class="banner hidden"></div>
+        <section id="view" class="view"></section>
+      </main>
+      <div id="toast" class="toast hidden"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

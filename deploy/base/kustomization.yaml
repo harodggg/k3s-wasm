@@ -1,0 +1,14 @@
+# base = 与「用哪种方式跑控制台」无关的公共部分。
+# 具体把控制台跑成 Deployment（shim-only）还是 SpinApp（SpinKube），见 overlays/。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - runtimeclass-spin.yaml
+  - runtimeclass-wasmtime.yaml
+  - kube-api-proxy.yaml
+  - ui-service.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: k3s-wasm

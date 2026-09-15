@@ -1,0 +1,61 @@
+# 控制台自身的工作负载：一个 wasm32-wasip2 组件，直接由 containerd 的 wasmtime shim 承载。
+#
+# 几个容易踩的点，都写在配置里了：
+#   1. runtimeClassName 是 wasmtime-wasip2（handler wasmtime），不是 spin 系。
+#   2. wasmtime shim 在容器网络命名空间里监听 **8080**（可用
+#      WASMTIME_HTTP_PROXY_SOCKET_ADDR 覆盖），不是 Spin 的 80。
+#   3. K8S_PROXY_URL 走的是容器 env。runwasi 的 wasmtime shim 会把容器 env 传给 guest
+#      （它调 wasmtime 的 .envs()），所以组件里的 wasi:cli/environment 能读到。
+#   4. 探针直接打 /api/health：组件会真的去问 kube-api-proxy，所以它能顺带证明
+#      「组件 → 代理 → API Server」这条链路是通的，比 TCP 探针有意义得多。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k3s-wasm-ui
+  namespace: k3s-wasm
+  labels:
+    app.kubernetes.io/name: k3s-wasm-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: k3s-wasm-ui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: k3s-wasm-ui
+        app.kubernetes.io/part-of: k3s-wasm
+    spec:
+      runtimeClassName: wasmtime-wasip2
+      serviceAccountName: k3s-wasm-ui
+      containers:
+        - name: ui
+          image: k3s-wasm/k3s-wasm-ui:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: K8S_PROXY_URL
+              value: http://kube-api-proxy.k3s-wasm.svc.cluster.local:8001
+            # 只有在构建时用 K3S_WASM_PROXY_URL 烘焙过别的地址时才需要这行；
+            # 组件是「环境变量优先，其次编译期默认值」。
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi

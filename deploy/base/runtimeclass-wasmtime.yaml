@@ -1,0 +1,21 @@
+# 标准 wasi:http/proxy 组件 / 命令式 wasm 用的 RuntimeClass。
+#
+# ⚠️ 名字为什么不是 `wasmtime`：k3s 在检测到 containerd-shim-wasmtime-v1 时会
+#    **自己**创建名为 `wasmtime` 的 RuntimeClass（handler wasmtime，且没有 nodeSelector）。
+#    如果我们也叫 wasmtime 并在里面写 nodeSelector，就可能被 k3s 的 addon 覆盖掉，
+#    结果是 Pod 被调度到没有 shim 的节点上，报错是
+#      failed to create shim task: no runtime for io.containerd.wasmtime.v1 is configured
+#    所以这里用一个独立名字：handler 仍然指向 containerd 里注册的 `wasmtime` runtime，
+#    但 scheduling 归我们控制。
+#
+# handler 必须等于 containerd 配置里的 runtime 名（.runtimes.<NAME>），不是 runtime_type。
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: wasmtime-wasip2
+  labels:
+    app.kubernetes.io/part-of: k3s-wasm
+handler: wasmtime
+scheduling:
+  nodeSelector:
+    wasm.sh/wasmtime: "true"

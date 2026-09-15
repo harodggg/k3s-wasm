@@ -1,0 +1,16 @@
+# 构建产物
+ui/frontend/dist/
+ui/frontend/node_modules/
+ui/backend/target/
+examples/*/target/
+
+# 本地运行时缓存
+.wasmtime-cache/
+.wasmtime-cache/**
+.spin/
+
+# 工具链与包管理缓存（工作区里那份，避免 ~ 不可写）
+
+# 编辑器/系统
+.DS_Store
+*.swp

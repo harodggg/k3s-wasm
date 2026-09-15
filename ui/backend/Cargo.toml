@@ -1,0 +1,36 @@
+[package]
+name = "k3s-wasm-ui"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "k3s WASM 控制台后端：编译为 wasm32-wasip2 的 wasi:http/proxy 组件"
+publish = false
+
+[lib]
+# 组件必须是 cdylib：导出 wasi:http/incoming-handler
+crate-type = ["cdylib"]
+
+[dependencies]
+# ⚠️ 这里刻意**不用** spin-sdk，用最底层的 wasi 绑定。原因是一个实测出来的坑：
+#
+#   组件模型里 wasi-http 的每个 0.2.x 补丁版本是**互不兼容**的独立包版本，
+#   宿主只实现其中某几个。spin-sdk 5.2 经 wit-bindgen 生成的是 `@0.2.9`，
+#   而 wasmtime 48 只实现 `@0.2.12`，于是直接报：
+#     component imports instance `wasi:cli/environment@0.2.9`,
+#     but a matching implementation was not found in the linker
+#
+#   `wasi`(wasip2) 的版本号后缀 `+wasi-0.2.12` 明确标出它生成的就是 0.2.12 ——
+#   与宿主对齐。用底层绑定的另一个好处：组件里**没有任何 spin:* 导入**，
+#   就是一个标准 wasi:http/proxy 组件，可以被任何合规宿主承载。
+wasi = "0.14"
+
+serde_json = "1"
+# 把前端 dist 在编译期嵌进 wasm：运行时不需要文件系统能力。
+include_dir = "0.7"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

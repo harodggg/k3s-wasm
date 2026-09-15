@@ -1,0 +1,22 @@
+[package]
+name = "hello-wasip2"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "最小的 wasm32-wasip2 工作负载示例：能在 k3s（containerd-shim-wasmtime）里跑起来"
+
+# 这是「裸 wasm32-wasip2 组件」示例：
+# 不依赖任何 wasm 专用 SDK，只用 Rust std → 用来证明 wasip2 运行时链路是通的。
+# 注意 wasip2 下 std 的 TcpStream/文件系统等能力由宿主（wasmtime）按 -S 开关授予；
+# 默认只授予 stdio + 环境变量 + args，所以这个例子不需要任何额外授权。
+
+[[bin]]
+name = "hello-wasip2"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -1,0 +1,23 @@
+# overlays/shim-only —— 默认部署路径：只依赖 containerd wasm shim，不需要 SpinKube。
+#
+# 控制台后端是一个标准 wasi:http/proxy 组件（导出 wasi:http/incoming-handler，
+# 没有任何 spin:* 导入），所以它跑在 **wasmtime** 运行时上，而不是 spin 运行时：
+# runwasi 的 wasmtime shim 按导出名自动识别这类组件，并在容器内监听 8080。
+#
+# 装法：
+#   ./scripts/install-wasm-runtime.sh            # 节点侧：装 shim + 配置 + 打标签
+#   ./scripts/build-ui.sh --import               # 构建并导入镜像
+#   kubectl apply -k deploy/overlays/shim-only
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: k3s-wasm
+
+resources:
+  - ../../base
+  - ui-deployment.yaml
+
+images:
+  # 换成你自己的仓库地址；用 --import 直接导进 k3s containerd 时保持这个名字即可
+  - name: k3s-wasm/k3s-wasm-ui
+    newTag: dev

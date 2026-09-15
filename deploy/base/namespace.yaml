@@ -1,0 +1,11 @@
+# 一个专门放 wasm 工作负载与这个控制台的命名空间。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k3s-wasm
+  labels:
+    app.kubernetes.io/part-of: k3s-wasm
+    # Pod Security Admission：wasm 容器不需要任何特权，standard 足够。
+    # 如果你的 k3s 打开了 PSA 强制（默认是 warn），这个标签能让控制台正常工作。
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: baseline

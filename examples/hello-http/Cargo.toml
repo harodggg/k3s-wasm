@@ -1,0 +1,21 @@
+[package]
+name = "hello-http"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "最小的 wasi:http/proxy 组件示例：既能被 wasmtime shim 承载，也能作为 Spin 应用跑"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# 与 ui/backend 同一个选择：底层 wasi(wasip2) 绑定，wasi-http 版本与宿主对齐（0.2.12）。
+# 不用 spin-sdk，于是组件里没有任何 spin:* 导入，两端宿主都能跑。
+wasi = "0.14"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

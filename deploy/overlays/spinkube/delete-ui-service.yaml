@@ -1,0 +1,8 @@
+# $patch: delete —— 让 kustomize 移除 base 里的这个对象。
+# 不删的话会和 spin-operator 为 SpinApp 自动创建的同名 Service 打架。
+apiVersion: v1
+kind: Service
+metadata:
+  name: k3s-wasm-ui
+  namespace: k3s-wasm
+$patch: delete
