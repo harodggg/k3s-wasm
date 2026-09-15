@@ -155,6 +155,8 @@ async function pollOnce(): Promise<void> {
 async function boot(): Promise<void> {
   try {
     const health = await api.health();
+    const v = document.getElementById('ui-version');
+    if (v) v.textContent = `v${health.version}`;
     state.defaultNamespace = health.defaultNamespace;
     if (!localStorage.getItem(NS_KEY)) state.currentNamespace = health.defaultNamespace;
     setConn(`已连接 · ${health.target}`, 'ok');

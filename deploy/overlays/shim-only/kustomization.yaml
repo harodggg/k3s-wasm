@@ -25,4 +25,4 @@ images:
   # CRI 会因为名字对不上而尝试真拉取，报 pull access denied。
   - name: k3s-wasm/k3s-wasm-ui
     newName: docker.io/k3s-wasm/k3s-wasm-ui
-    newTag: dev
+    newTag: v0.2.0

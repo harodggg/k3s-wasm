@@ -62,6 +62,7 @@ function del<T>(path: string): Promise<T> {
 export interface Health {
   status: string;
   component: string;
+  version: string;
   target: string;
   proxyUrl: string;
   proxyUrlSource: string;

@@ -214,6 +214,8 @@ pub fn health(_req: &Request) -> Response {
     Response::ok(json!({
         "status": "ok",
         "component": "k3s-wasm-ui",
+        // 版本号来自 Cargo.toml（编译期常量），前端把它显示在侧栏
+        "version": env!("CARGO_PKG_VERSION"),
         "target": "wasm32-wasip2",
         "interface": "wasi:http/incoming-handler@0.2.12",
         "proxyUrl": cfg.proxy_url,

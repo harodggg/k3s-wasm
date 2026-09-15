@@ -361,9 +361,15 @@ export function xrayView(): ViewInstance {
       const secretName = input('可选：引用已存在的 Secret（填了就不由控制台创建）');
       const listen = input('0.0.0.0:1080', '0.0.0.0:1080');
       const replicas = input('2', '2', 'number') as HTMLInputElement;
-      const image = input('docker.io/k3s-wasm/xray-wasm-cli:v0.1.0');
-      image.setAttribute('list', 'xray-image-options');
-      const xrayImageList = el('datalist', { attrs: { id: 'xray-image-options' } });
+      // 固定仓库 + 实时版本：版本列表从 GitHub releases 取，镜像 = 仓库 + 所选版本
+      const IMAGE_REPO = 'docker.io/k3s-wasm/xray-wasm-cli';
+      const image = input('docker.io/k3s-wasm/xray-wasm-cli:v0.2.0');
+      const imageTagSel = el('select', { class: 'input' }) as HTMLSelectElement;
+      imageTagSel.append(el('option', { text: '版本加载中…' }) as HTMLOptionElement);
+      imageTagSel.addEventListener('change', () => {
+        if (imageTagSel.value === '__custom__') { image.focus(); return; }
+        if (imageTagSel.value) image.value = `${IMAGE_REPO}:${imageTagSel.value}`;
+      });
 
       // 用途：直接决定 Service 是 ClusterIP 还是 NodePort，以及 NetworkPolicy 是否放行外部来源
       const exposeSel = el('select', { class: 'input' }) as HTMLSelectElement;
@@ -526,43 +532,43 @@ export function xrayView(): ViewInstance {
         }
       }, 'primary');
 
-      // 镜像候选 = ① 版本 tag（GitHub releases：v0.3.0/v0.2.0/v0.1.0…）
-      //            ② 集群里正在跑的 wasm 镜像（一定已在节点上，标"集群已有"）
-      //            ③ 兜底建议
-      // 拉不到任何来源也不影响手输 —— 这里刻意不抛错。
+      // 版本候选（实时）：① /api/image-tags（GitHub releases）② 集群里在跑的镜像反推版本（标「集群已有」）
+      // 两个来源都拉不到就留可编辑输入框，不阻塞使用。
       try {
         const [tags, imgs] = await Promise.all([
           ctx.api.imageTags('harodggg/xray-wasm').catch(() => null),
           ctx.api.images(true).catch(() => null),
         ]);
         const running = new Set((imgs?.items ?? []).map((i) => i.image));
-        const WANT = 'docker.io/k3s-wasm/xray-wasm-cli'; // 纯 wasm 模块镜像，配 wasmtime shim
-        const byTag = (tags?.tags ?? [])
-          .map((t) => t.tag)
-          .filter((t) => t.length > 0)
-          .map((t) => `${WANT}:${t}`);
-        const rest = [...(imgs?.items ?? []).map((i) => i.image), ...(imgs?.defaults ?? [])].filter(
-          (v) => !byTag.includes(v),
-        );
-        const all: string[] = [];
-        const seen = new Set<string>();
-        for (const v of [...byTag, ...rest]) {
-          if (!seen.has(v)) {
-            seen.add(v);
-            all.push(v);
+        const versions: string[] = [];
+        for (const t of tags?.tags ?? []) if (t.tag) versions.push(t.tag);
+        for (const img of running) {
+          if (img.startsWith(`${IMAGE_REPO}:`)) {
+            const v = img.slice(IMAGE_REPO.length + 1);
+            if (v && !versions.includes(v)) versions.push(v);
           }
         }
-        xrayImageList.replaceChildren(
-          ...all.map((v) => el('option', { attrs: { value: v, ...(running.has(v) ? { label: '集群已有' } : {}) } })),
+        if (versions.length === 0) versions.push('v0.2.0');
+        imageTagSel.replaceChildren(
+          ...versions.map((v) => {
+            const o = el('option', {
+              text: running.has(`${IMAGE_REPO}:${v}`) ? `${v}（集群已有）` : v,
+            }) as HTMLOptionElement;
+            o.value = v;
+            return o;
+          }),
+          (() => {
+            const o = el('option', { text: '自定义（在下面手输完整镜像）' }) as HTMLOptionElement;
+            o.value = '__custom__';
+            return o;
+          })(),
         );
-        if (!image.value.trim()) {
-          image.value = byTag.find((v) => running.has(v)) ?? byTag[0] ?? all[0] ?? '';
-        }
+        const pick = versions.find((v) => running.has(`${IMAGE_REPO}:${v}`)) ?? versions[0]!;
+        imageTagSel.value = pick;
+        if (!image.value.trim()) image.value = `${IMAGE_REPO}:${pick}`;
       } catch {
-        /* 候选拉不到就手输 */
+        /* 拉不到版本就手输 */
       }
-
-
       host.append(
         el(
           'div',
@@ -602,8 +608,8 @@ export function xrayView(): ViewInstance {
               el('div', { class: 'grid-2-tight' }, field('已有 Secret（可选）', secretName), field('SOCKS5 监听', listen)),
               field('用途', exposeSel, '入站=外部经节点IP连进来用；出站=集群内 Pod 用它出网。两者可同时具备'),
               el('div', { class: 'grid-2-tight' }, field('NodePort（可选）', nodePortIn), field('放行来源（外部用途时）', allowFromIn)),
-              field('镜像', image, '下拉里是集群里正在跑的镜像（含 wasm 工作负载用过的）；也可以手输'),
-              xrayImageList,
+              field('镜像版本', imageTagSel, '版本列表实时取自 GitHub releases；标「集群已有」的可直接用'),
+              field('镜像', image, '固定仓库 docker.io/k3s-wasm/xray-wasm-cli；选上面的版本会自动填这里，也可手输别的'),
               created,
               create,
             ),
