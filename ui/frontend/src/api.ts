@@ -209,6 +209,8 @@ export interface XrayTunnel {
   directionLabel: string;
   egress: { via: string | null; protocol: string; note: string };
   ingress: { endpoint: string; exposure: TunnelExposure };
+  /** 谁可以用：outbound=集群内 Pod；inbound=外部经节点IP（要求已对外暴露） */
+  usage: { outbound: boolean; inbound: boolean; allowFrom: string | null };
 }
 
 /** 自动生成的一整套隧道参数（含只出现一次的私钥） */
@@ -293,6 +295,26 @@ export interface CreateTunnelBody {
   replicas?: number;
   image?: string;
   runtimeClassName?: string;
+  /** cluster = 仅集群内（出站）；nodeport = 允许外部经节点IP使用（入站） */
+  expose?: 'cluster' | 'nodeport';
+  nodePort?: number;
+  /** 外部用途时的放行来源 CIDR，默认 0.0.0.0/0（=公开，强烈建议收窄） */
+  allowFrom?: string;
+}
+
+/** 创建隧道后的连接方式（后端从请求 Host 推出节点地址） */
+export interface CreatedTunnel {
+  created: boolean;
+  namespace: string;
+  name: string;
+  secret: string;
+  socksEndpoint: string;
+  portForward: string;
+  expose: 'cluster' | 'nodeport';
+  externalEndpoint: string | null;
+  allowFrom: string | null;
+  usage: string;
+  note: string;
 }
 
 // ── 接口 ────────────────────────────────────────────────────────────
@@ -333,7 +355,7 @@ export const api = {
 
   tunnels: (namespace?: string) => request<XrayList>(`/api/xray/tunnels${q({ namespace })}`),
   generateTunnel: (body: GenerateTunnelBody) => post<GeneratedTunnel>('/api/xray/generate', body),
-  createTunnel: (body: CreateTunnelBody) => post<unknown>('/api/xray/tunnels', body),
+  createTunnel: (body: CreateTunnelBody) => post<CreatedTunnel>('/api/xray/tunnels', body),
   scaleTunnel: (ns: string, name: string, replicas: number) =>
     post<unknown>(`/api/xray/tunnels/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/scale`, { replicas }),
   deleteTunnel: (ns: string, name: string) =>

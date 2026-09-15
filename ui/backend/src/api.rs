@@ -808,6 +808,12 @@ fn xray_shape(dep: &Value, svc: Option<&Value>) -> Value {
             "endpoint": format!("{name}.{ns}.svc.cluster.local:{port}"),
             "exposure": shape_exposure(svc, port),
         },
+        // 谁可以用：出站=集群内 Pod；入站=外部经节点IP（要求 Service 已对外暴露）
+        "usage": {
+            "outbound": true,
+            "inbound": shape_exposure(svc, port)["public"].as_bool().unwrap_or(false),
+            "allowFrom": ann["k3s-wasm/allow-from"],
+        },
     })
 }
 
@@ -969,6 +975,26 @@ pub fn xray_create(req: &Request) -> Response {
         .filter(|s| !s.is_empty())
         .unwrap_or("wasmtime-wasip2")
         .to_string();
+    // 用途：cluster = 仅集群内（出站）；nodeport = 同时允许外部经「节点IP:nodePort」使用（入站）
+    let expose = body["expose"].as_str().unwrap_or("cluster").to_lowercase();
+    let external = expose == "nodeport" || expose == "external" || body["external"].as_bool() == Some(true);
+    let node_port = body["nodePort"].as_u64().filter(|p| (30000..=32767).contains(p));
+    // 外部可用时，NetworkPolicy 必须放行来源 —— 否则 Cilium 会把 NodePort 进来的流量丢掉。
+    // 默认 0.0.0.0/0（等于公开），强烈建议填自己的出口 IP/CIDR。
+    let allow_from = body["allowFrom"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("0.0.0.0/0")
+        .to_string();
+    // 节点地址从请求的 Host 头推出来（面板通常就是经节点IP访问的），用于拼对外连接串
+    let req_host = req
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+        .map(|(_, v)| v.split(':').next().unwrap_or("").to_string())
+        .filter(|h| !h.is_empty());
+
     let secret_name = body["secretName"]
         .as_str()
         .filter(|s| !s.is_empty())
@@ -1029,6 +1055,8 @@ pub fn xray_create(req: &Request) -> Response {
                 "k3s-wasm/sni": sni,
                 "k3s-wasm/short-id": short_id,
                 "k3s-wasm/listen": listen,
+                "k3s-wasm/expose": if external { "nodeport" } else { "cluster" },
+                "k3s-wasm/allow-from": if external { allow_from.as_str() } else { "" },
             },
         },
         "spec": {
@@ -1073,15 +1101,21 @@ pub fn xray_create(req: &Request) -> Response {
         return from_err(e);
     }
 
-    // 3) ClusterIP Service（刻意不用 NodePort/LoadBalancer）
+    // 3) Service：默认 ClusterIP（只有集群内能用）；勾了"允许外部"才给 NodePort
+    let mut svc_port = json!({ "name": "socks", "port": port, "targetPort": port, "protocol": "TCP" });
+    if external {
+        if let Some(np) = node_port {
+            svc_port["nodePort"] = json!(np);
+        }
+    }
     let service = json!({
         "apiVersion": "v1",
         "kind": "Service",
         "metadata": { "name": name, "namespace": namespace, "labels": labels },
         "spec": {
-            "type": "ClusterIP",
+            "type": if external { "NodePort" } else { "ClusterIP" },
             "selector": { "app.kubernetes.io/name": name },
-            "ports": [{ "name": "socks", "port": port, "targetPort": port, "protocol": "TCP" }]
+            "ports": [svc_port]
         }
     });
     if let Err(e) = k8s.post(&format!("/api/v1/namespaces/{namespace}/services"), &service) {
@@ -1096,6 +1130,13 @@ pub fn xray_create(req: &Request) -> Response {
     //   在 Cilium + kube-proxy 替换 + 服务端就在同一节点 IP 上这个组合下复现稳定。
     //   想要 egress 收紧的话：自行加上并**务必复测隧道**（deploy/xray-wasm/networkpolicy.yaml
     //   里留了注释掉的模板）。
+    // 允许来源：集群内 Pod 一直允许；勾了外部用途再额外放行一个 CIDR。
+    // ⚠️ 少了这条，外部经 NodePort 的连接会被 Cilium 按默认拒绝丢掉 ——
+    //    现象是「Service 是 NodePort、端口也通，但 SOCKS5 就是没响应」。
+    let mut ingress_from = vec![json!({ "podSelector": {} })];
+    if external {
+        ingress_from.push(json!({ "ipBlock": { "cidr": allow_from } }));
+    }
     let netpol = json!({
         "apiVersion": "networking.k8s.io/v1",
         "kind": "NetworkPolicy",
@@ -1104,7 +1145,7 @@ pub fn xray_create(req: &Request) -> Response {
             "podSelector": { "matchLabels": { "app.kubernetes.io/name": name } },
             "policyTypes": ["Ingress"],
             "ingress": [{
-                "from": [{ "podSelector": {} }],
+                "from": ingress_from,
                 "ports": [{ "protocol": "TCP", "port": port }]
             }]
         }
@@ -1118,15 +1159,36 @@ pub fn xray_create(req: &Request) -> Response {
         }));
     }
 
+    let external_endpoint = if external {
+        let np = node_port
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "<自动分配的 nodePort，见 kubectl get svc>".to_string());
+        Some(match &req_host {
+            Some(h) => format!("socks5h://{h}:{np}"),
+            None => format!("socks5h://<节点IP>:{np}"),
+        })
+    } else {
+        None
+    };
+
     Response::ok(json!({
         "created": true,
         "namespace": namespace,
         "name": name,
         "secret": secret_name,
+        // 出站用途（集群内 Pod）
         "socksEndpoint": format!("{name}.{namespace}.svc.cluster.local:{port}"),
         "portForward": format!("kubectl -n {namespace} port-forward svc/{name} 1080:{port}"),
+        // 入站用途（外部经节点 IP）
+        "expose": if external { "nodeport" } else { "cluster" },
+        "externalEndpoint": external_endpoint,
+        "allowFrom": if external { Value::String(allow_from.clone()) } else { Value::Null },
         "usage": format!("curl --proxy-user '<user>:<pass>' --proxy socks5h://{name}.{namespace}.svc.cluster.local:{port} https://example.com"),
-        "note": "SOCKS5 必须带认证（表单已强制）；Service 刻意是 ClusterIP，不要改成 NodePort。",
+        "note": if external {
+            "已允许外部经节点 IP 使用：务必用强密码，并尽量把 allowFrom 收窄到你的出口 IP —— 否则这就是一个对全网开放的代理。"
+        } else {
+            "仅集群内可用（ClusterIP）。要用它翻墙/给本机用：改用途为 nodeport，或用 port-forward / SSH 隧道。"
+        },
     }))
 }
 

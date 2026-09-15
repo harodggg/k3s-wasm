@@ -231,10 +231,12 @@ export function xrayView(): ViewInstance {
           kv('出站链路', `${t.egress?.via ?? t.tunnel.server ?? '-'} · ${t.egress?.protocol ?? 'SOCKS5 → VLESS+REALITY'}`),
           kv('入站入口', t.ingress?.endpoint ?? `${t.name}.${t.namespace}.svc.cluster.local:${port}`),
           kv(
-            '入站暴露',
-            `${t.ingress?.exposure?.reach ?? '未知'}${
-              t.ingress?.exposure?.serviceType ? ` · Service 类型 ${t.ingress.exposure.serviceType}` : ''
-            }`,
+            '入站（外部经节点IP）',
+            t.usage?.inbound
+              ? `可用 · ${t.ingress?.exposure?.reach ?? ''}${
+                  t.ingress?.exposure?.nodePort ? ` · socks5h://<节点IP>:${t.ingress.exposure.nodePort}` : ''
+                }${t.usage?.allowFrom ? ` · 放行来源 ${t.usage.allowFrom}` : ''}`
+              : `不可用（${t.ingress?.exposure?.reach ?? '未知'}）—— 改用途为 nodeport 才可外部使用`,
           ),
           kv('命名空间', t.namespace),
           kv('SNI', t.tunnel.sni ?? '-'),
@@ -310,6 +312,20 @@ export function xrayView(): ViewInstance {
       const listen = input('0.0.0.0:1080', '0.0.0.0:1080');
       const replicas = input('2', '2', 'number') as HTMLInputElement;
       const image = input('docker.io/k3s-wasm/xray-wasm-cli:v0.1.0');
+
+      // 用途：直接决定 Service 是 ClusterIP 还是 NodePort，以及 NetworkPolicy 是否放行外部来源
+      const exposeSel = el('select', { class: 'input' }) as HTMLSelectElement;
+      for (const [v, label] of [
+        ['cluster', '仅集群内（出站：集群里的 Pod 用它出网）'],
+        ['nodeport', '允许外部经节点 IP（入站：我自己翻墙用）'],
+      ] as [string, string][]) {
+        const o = el('option', { text: label }) as HTMLOptionElement;
+        o.value = v;
+        exposeSel.append(o);
+      }
+      const nodePortIn = input('留空自动分配，如 31080');
+      const allowFromIn = input('如 1.2.3.4/32；默认 0.0.0.0/0 = 对全网开放');
+      const created = el('div', { class: 'stack' });
 
       // vless:// 解析放在后端做（前端只把原文传过去），避免两处实现漂移
       vlessLink.addEventListener('change', () => {
@@ -389,7 +405,7 @@ export function xrayView(): ViewInstance {
 
       const create = button('② 创建隧道', async () => {
         try {
-          await ctx.api.createTunnel({
+          const res = await ctx.api.createTunnel({
             name: name.value.trim(),
             namespace: ctx.currentNamespace === '_all' ? ctx.defaultNamespace : ctx.currentNamespace,
             vlessLink: vlessLink.value.trim() || undefined,
@@ -404,9 +420,39 @@ export function xrayView(): ViewInstance {
             listen: listen.value.trim(),
             replicas: Number(replicas.value || '2'),
             image: image.value.trim(),
+            expose: exposeSel.value === 'nodeport' ? 'nodeport' : 'cluster',
+            nodePort: Number(nodePortIn.value.trim()) || undefined,
+            allowFrom: allowFromIn.value.trim() || undefined,
           });
-          toast(`已创建 ${name.value}`);
-          name.value = '';
+
+          // 把两种用途的连接方式直接摊开，省得用户自己拼地址
+          const line = (label: string, text: string) => {
+            const ta = el('textarea', { class: 'input mono', attrs: { readonly: '', rows: '2' } }) as HTMLTextAreaElement;
+            ta.value = text;
+            return el(
+              'div',
+              { class: 'stack' },
+              el('div', { class: 'field-label', text: label }),
+              ta,
+              button('复制', async () => {
+                const ok = await copyText(text);
+                toast(ok ? `已复制${label}` : '复制失败：请手动复制', ok ? 'ok' : 'err');
+              }),
+            );
+          };
+          const u = socksUser.value.trim();
+          const p2 = socksPass.value;
+          created.replaceChildren(
+            el('div', { class: 'hint hint-info' },
+              el('div', { class: 'hint-title', text: `已创建 ${res.name}（${res.expose === 'nodeport' ? '入站+出站' : '仅出站'}）` }),
+              el('div', { class: 'hint-detail', text: res.note })),
+            line('出站（集群内 Pod 用）', `curl --proxy-user '${u}:${p2}' --proxy ${res.socksEndpoint.replace(/^/, 'socks5h://')} https://api.ipify.org`),
+            ...(res.externalEndpoint
+              ? [line('入站（你本机翻墙用）', `curl --proxy-user '${u}:${p2}' --proxy ${res.externalEndpoint} https://api.ipify.org`)]
+              : []),
+            line('或者 port-forward（不用暴露端口）', res.portForward),
+          );
+          toast(`已创建 ${res.name}`);
           await reload();
         } catch (e) {
           toast(`创建失败：${errorText(e)}`, 'err');
@@ -449,7 +495,10 @@ export function xrayView(): ViewInstance {
               el('div', { class: 'grid-2-tight' }, field('shortId', shortId), field('SNI', sni)),
               el('div', { class: 'grid-2-tight' }, field('SOCKS5 用户名', socksUser), field('SOCKS5 密码', socksPass)),
               el('div', { class: 'grid-2-tight' }, field('已有 Secret（可选）', secretName), field('SOCKS5 监听', listen)),
+              field('用途', exposeSel, '入站=外部经节点IP连进来用；出站=集群内 Pod 用它出网。两者可同时具备'),
+              el('div', { class: 'grid-2-tight' }, field('NodePort（可选）', nodePortIn), field('放行来源（外部用途时）', allowFromIn)),
               field('镜像', image),
+              created,
               create,
             ),
           ),
