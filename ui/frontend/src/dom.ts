@@ -171,6 +171,36 @@ export function toast(message: string, kind: 'ok' | 'err' = 'ok'): void {
   }, kind === 'err' ? 8000 : 3000);
 }
 
+/** 复制到剪贴板。
+ *
+ * 面板是通过明文 HTTP + IP 访问的（不是安全上下文），此时 navigator.clipboard
+ * 根本不存在，只能退回 execCommand。所以这里两条路都走一遍，并把结果如实返回。
+ */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* 落到下面的兜底 */
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    document.body.append(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 export function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }

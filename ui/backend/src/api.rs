@@ -774,6 +774,9 @@ pub fn xray_list(req: &Request) -> Response {
 /// （字段拆错的表现是握手失败，且错误信息很不直观）。
 pub fn parse_vless_link(link: &str) -> Option<Value> {
     let rest = link.trim().strip_prefix("vless://")?;
+    // 先剥掉 #fragment（节点名）：否则最后一个 query 参数会被它污染，
+    // 表现为 flow 之类解析成 "xtls-rprx-vision#Xray" —— 握手就会失败。
+    let rest = rest.split('#').next().unwrap_or(rest);
     let (uuid, rest) = rest.split_once('@')?;
     let (authority, query) = rest.split_once('?')?;
     let mut out = json!({ "uuid": uuid, "server": authority });
@@ -1098,6 +1101,197 @@ pub fn xray_delete(_req: &Request, ns: &str, name: &str) -> Response {
     Response::ok(json!({ "deleted": deleted, "namespace": ns, "name": name }))
 }
 
+
+// ════════════════════════════════════════════════════════════════════
+// 自动生成隧道参数
+// ════════════════════════════════════════════════════════════════════
+//
+// 生成一整套「客户端 + 服务端」配套参数：
+//   · REALITY 的 X25519 密钥对（私钥给服务端，公钥 pbk 给客户端）
+//   · UUID、shortId、SOCKS5 用户名/密码
+//   · 可直接粘贴的服务端 config.json、客户端 config.json、vless:// 链接
+//
+// 随机数用宿主提供的 wasi:random（不引 getrandom/rand，组件体积与依赖都更小）。
+// 私钥只在响应里出现一次，控制台不落盘、不记录。
+
+fn random_bytes(n: usize) -> Vec<u8> {
+    wasi::random::random::get_random_bytes(n as u64)
+}
+
+/// base64url（无 padding）—— Xray 的 x25519 密钥就是这个编码
+fn b64url(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// 16 字节 → UUIDv4 字符串（设置版本位与变体位，符合 RFC 4122）
+fn uuid_from_bytes(b: &[u8]) -> String {
+    let mut x = [0u8; 16];
+    for (i, v) in b.iter().take(16).enumerate() {
+        x[i] = *v;
+    }
+    x[6] = (x[6] & 0x0f) | 0x40; // version 4
+    x[8] = (x[8] & 0x3f) | 0x80; // variant 10xx
+    let h: String = x.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32]
+    )
+}
+
+fn bytes_to_hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// REALITY 密钥对 → (私钥 base64url, 公钥 base64url)
+fn reality_keypair() -> (String, String) {
+    let raw = random_bytes(32);
+    let mut secret_bytes = [0u8; 32];
+    secret_bytes.copy_from_slice(&raw[..32]);
+    let secret = x25519_dalek::StaticSecret::from(secret_bytes);
+    let public = x25519_dalek::PublicKey::from(&secret);
+    (
+        b64url(&secret.to_bytes()),
+        b64url(public.as_bytes()),
+    )
+}
+
+/// 把 `host:port` 拆开；没有端口时给默认值
+fn split_host_port(s: &str, default_port: u16) -> (String, u16) {
+    match s.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() => match p.parse::<u16>() {
+            Ok(port) if port > 0 => (h.to_string(), port),
+            _ => (s.to_string(), default_port),
+        },
+        _ => (s.to_string(), default_port),
+    }
+}
+
+fn build_vless_link(uuid: &str, server: &str, pbk: &str, sid: &str, sni: &str, name: &str) -> String {
+    // 参数顺序尽量贴近官方客户端导出的样子；spx 固定 /（REALITY 的回落到路径）
+    format!(
+        "vless://{uuid}@{server}?encryption=none&type=tcp&security=reality&pbk={pbk}&fp=chrome&sni={sni}&sid={sid}&spx=%2F&flow=xtls-rprx-vision#{name}"
+    )
+}
+
+fn build_server_config(uuid: &str, private_key: &str, sid: &str, sni: &str, port: u16) -> Value {
+    json!({
+        "log": { "loglevel": "warning" },
+        "inbounds": [{
+            "listen": "0.0.0.0",
+            "port": port,
+            "protocol": "vless",
+            "settings": {
+                "clients": [{ "id": uuid, "flow": "xtls-rprx-vision" }],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                    // dest 就是「回落站点」：未通过 REALITY 认证的探测流量会被转发到这里
+                    "dest": format!("{sni}:443"),
+                    "serverNames": [sni],
+                    "privateKey": private_key,
+                    "shortIds": [sid]
+                }
+            }
+        }],
+        "outbounds": [{ "protocol": "freedom" }]
+    })
+}
+
+fn build_client_config(uuid: &str, server: &str, pbk: &str, sid: &str, sni: &str) -> Value {
+    let (host, port) = split_host_port(server, 443);
+    json!({
+        "log": { "loglevel": "warning" },
+        "inbounds": [{
+            "listen": "127.0.0.1", "port": 1080, "protocol": "socks",
+            "settings": { "auth": "noauth", "udp": false }
+        }],
+        "outbounds": [{
+            "protocol": "vless",
+            "settings": { "vnext": [{
+                "address": host, "port": port,
+                "users": [{ "id": uuid, "encryption": "none", "flow": "xtls-rprx-vision" }]
+            }] },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                    "serverName": sni, "fingerprint": "chrome",
+                    "publicKey": pbk, "shortId": sid, "spiderX": "/"
+                }
+            }
+        }]
+    })
+}
+
+/// POST /api/xray/generate
+/// body（都可省）：{ "server": "1.2.3.4:443", "sni": "www.cloudflare.com", "name": "tokyo" }
+pub fn xray_generate(req: &Request) -> Response {
+    let body = req.json_body().unwrap_or_else(|_| json!({}));
+    let server = body["server"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("203.0.113.10:443")
+        .to_string();
+    let sni = body["sni"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("www.cloudflare.com")
+        .to_string();
+    let name = body["name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("k3s-wasm")
+        .to_string();
+
+    let (private_key, public_key) = reality_keypair();
+    let uuid = uuid_from_bytes(&random_bytes(16));
+    let short_id = bytes_to_hex(&random_bytes(8));
+    // SOCKS5 认证：默认用户名 k3s，密码 18 字节随机（base64url，无易混字符）
+    let socks_user = body["socksUser"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("k3s")
+        .to_string();
+    let socks_pass = b64url(&random_bytes(18));
+
+    let (_, port) = split_host_port(&server, 443);
+    let link = build_vless_link(&uuid, &server, &public_key, &short_id, &sni, &name);
+    let server_config = build_server_config(&uuid, &private_key, &short_id, &sni, port);
+    let client_config = build_client_config(&uuid, &server, &public_key, &short_id, &sni);
+
+    Response::ok(json!({
+        // 直接填进表单的字段
+        "name": name,
+        "server": server,
+        "uuid": uuid,
+        "publicKey": public_key,
+        "shortId": short_id,
+        "sni": sni,
+        "socksUser": socks_user,
+        "socksPass": socks_pass,
+        // 私钥只在这里出现一次：它属于**服务端**，控制台不保存
+        "privateKey": private_key,
+        "vlessLink": link,
+        "serverConfig": server_config,
+        "clientConfig": client_config,
+        "notes": [
+            "私钥只在本响应里出现一次，控制台不保存、不写入集群；请立刻粘到服务端配置里并妥善保管。",
+            "服务端：把 serverConfig 覆盖到服务器的 config.json（或只取其 inbound），重启 xray。",
+            "客户端：vlessLink 可直接导入官方客户端；clientConfig 是官方 Xray 的等价配置，便于先验证服务端。",
+            "SOCKS5 用户名/密码只用于**集群内**这条隧道的入口认证，与上面服务端配置无关。",
+            "若服务端设了 minClientVer/maxClientVer，客户端上报版本需落在区间内（默认 26.3.27，可用 clientVer 覆盖）。"
+        ]
+    }))
+}
+
 // ════════════════════════════════════════════════════════════════════
 // 单测（纯函数，原生可跑）
 // ════════════════════════════════════════════════════════════════════
@@ -1196,6 +1390,70 @@ mod tests {
         ]});
         let filtered = filter_items_by_ns(list, "a");
         assert_eq!(filtered["items"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn b64url_matches_known_vector_and_strips_padding() {
+        // RFC 4648 的 base64url 向量 + 「无 padding」这一点（Xray 的密钥就是这个格式）
+        assert_eq!(b64url(b"foobar"), "Zm9vYmFy");
+        assert_eq!(b64url(&[0xff, 0xef]), "_-8");
+        assert!(!b64url(&[1, 2, 3]).contains('='));
+    }
+
+    #[test]
+    fn uuid_from_bytes_sets_version_and_variant() {
+        let u = uuid_from_bytes(&[0u8; 16]);
+        assert_eq!(u.len(), 36);
+        assert_eq!(u.chars().filter(|c| *c == '-').count(), 4);
+        let parts: Vec<&str> = u.split('-').collect();
+        assert_eq!(
+            [parts[0].len(), parts[1].len(), parts[2].len(), parts[3].len(), parts[4].len()],
+            [8, 4, 4, 4, 12]
+        );
+        assert!(parts[2].starts_with('4'), "版本位应为 4，实际 {}", parts[2]);
+        assert!(
+            matches!(parts[3].chars().next().unwrap(), '8' | '9' | 'a' | 'b'),
+            "变体位应为 10xx，实际 {}",
+            parts[3]
+        );
+    }
+
+    #[test]
+    fn generated_link_round_trips_through_parser() {
+        // 生成 → 解析 必须自洽：面板正是靠这个链路把链接拆回字段
+        let link = build_vless_link(
+            "11111111-2222-3333-4444-555555555555",
+            "203.0.113.10:443",
+            "PUBKEY",
+            "9f1c2a3b",
+            "www.cloudflare.com",
+            "tokyo",
+        );
+        let v = parse_vless_link(&link).expect("自己生成的链接必须能被自己解析");
+        assert_eq!(v["uuid"], "11111111-2222-3333-4444-555555555555");
+        assert_eq!(v["server"], "203.0.113.10:443");
+        assert_eq!(v["publicKey"], "PUBKEY");
+        assert_eq!(v["shortId"], "9f1c2a3b");
+        assert_eq!(v["sni"], "www.cloudflare.com");
+        assert_eq!(v["flow"], "xtls-rprx-vision");
+    }
+
+    #[test]
+    fn server_config_carries_private_key_and_dest() {
+        let cfg = build_server_config("uuid-1", "PRIVKEY", "sid1", "www.cloudflare.com", 443);
+        let ib = &cfg["inbounds"][0];
+        assert_eq!(ib["settings"]["clients"][0]["id"], "uuid-1");
+        assert_eq!(ib["settings"]["clients"][0]["flow"], "xtls-rprx-vision");
+        assert_eq!(ib["streamSettings"]["realitySettings"]["privateKey"], "PRIVKEY");
+        assert_eq!(ib["streamSettings"]["realitySettings"]["dest"], "www.cloudflare.com:443");
+        assert_eq!(ib["port"], 443);
+    }
+
+    #[test]
+    fn split_host_port_handles_edge_cases() {
+        assert_eq!(split_host_port("1.2.3.4:8443", 443), ("1.2.3.4".into(), 8443));
+        assert_eq!(split_host_port("1.2.3.4", 443), ("1.2.3.4".into(), 443));
+        assert_eq!(split_host_port("1.2.3.4:abc", 443), ("1.2.3.4:abc".into(), 443));
     }
 
     #[test]

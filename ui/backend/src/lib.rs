@@ -71,6 +71,8 @@ fn route(req: &Request) -> Response {
         // ── xray-wasm 隧道 ─────────────────────────────────────────
         ("GET", ["api", "xray", "tunnels"]) => api::xray_list(req),
         ("POST", ["api", "xray", "tunnels"]) => api::xray_create(req),
+        // 自动生成一整套隧道参数（密钥对/UUID/shortId/SOCKS 凭据 + 服务端与客户端配置）
+        ("POST", ["api", "xray", "generate"]) => api::xray_generate(req),
         ("POST", ["api", "xray", "tunnels", ns, name, "scale"]) => {
             api::xray_scale(req, ns, name)
         }

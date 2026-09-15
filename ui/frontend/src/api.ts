@@ -195,6 +195,30 @@ export interface XrayTunnel {
   isWasm: boolean;
 }
 
+/** 自动生成的一整套隧道参数（含只出现一次的私钥） */
+export interface GeneratedTunnel {
+  name: string;
+  server: string;
+  uuid: string;
+  publicKey: string;
+  shortId: string;
+  sni: string;
+  socksUser: string;
+  socksPass: string;
+  privateKey: string;
+  vlessLink: string;
+  serverConfig: Record<string, unknown>;
+  clientConfig: Record<string, unknown>;
+  notes: string[];
+}
+
+export interface GenerateTunnelBody {
+  server?: string;
+  sni?: string;
+  name?: string;
+  socksUser?: string;
+}
+
 export interface XrayList {
   items: XrayTunnel[];
   shim: { runtimeClass: string; requiredNodeLabel: string };
@@ -292,6 +316,7 @@ export const api = {
     del<unknown>(`/api/spinapps/${encodeURIComponent(ns)}/${encodeURIComponent(name)}${q({ apiVersion })}`),
 
   tunnels: (namespace?: string) => request<XrayList>(`/api/xray/tunnels${q({ namespace })}`),
+  generateTunnel: (body: GenerateTunnelBody) => post<GeneratedTunnel>('/api/xray/generate', body),
   createTunnel: (body: CreateTunnelBody) => post<unknown>('/api/xray/tunnels', body),
   scaleTunnel: (ns: string, name: string, replicas: number) =>
     post<unknown>(`/api/xray/tunnels/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/scale`, { replicas }),

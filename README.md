@@ -119,8 +119,11 @@ make e2e                          # 31 项端到端断言（真实 wasm 宿主�
 | Service | **ClusterIP**（上游安全须知明确不要 NodePort/LoadBalancer） |
 | NetworkPolicy | 认证管「谁能用」，它管「谁能连」，egress 收紧到 REALITY 服务端 IP |
 
-表单支持直接粘贴 `vless://` 链接自动拆参数；强制要求 SOCKS5 用户名/密码
-（绑 `0.0.0.0` 而无认证就是开放代理）。清单也可直接用 `deploy/xray-wasm/`。
+表单支持**一键自动生成整套参数**（REALITY 密钥对 + UUID + shortId + SOCKS 凭据），
+并同时给出服务端 `config.json`、客户端 `config.json` 与 `vless://` 链接 —— 私钥只显示一次、
+控制台不保存。也可以直接粘贴现成的 `vless://` 链接自动拆参数。
+强制要求 SOCKS5 用户名/密码（绑 `0.0.0.0` 而无认证就是开放代理）。
+纯清单版本见 `deploy/xray-wasm/`。
 
 真机验证（k3s v1.36 + wasmtime shim v0.6.1）：`--self-test` REALITY 握手 11.7ms；
 经隧道出网 HTTP 200；**无认证请求被拒绝**（`No authentication method was acceptable`）。

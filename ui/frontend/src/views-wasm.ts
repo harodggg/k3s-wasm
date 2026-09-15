@@ -5,7 +5,7 @@
 // 否则用户正在输入时会被轮询清空。
 
 import type { SpinApp, SpinAppExecutorInfo, XrayTunnel } from './api';
-import { age, badge, button, card, clear, el, empty, errorText, field, input, toast } from './dom';
+import { age, badge, button, card, clear, copyText, el, empty, errorText, field, input, toast } from './dom';
 import type { Ctx, ViewInstance } from './view-types';
 
 // ── SpinKube：SpinApp ───────────────────────────────────────────────
@@ -306,7 +306,69 @@ export function xrayView(): ViewInstance {
         }
       });
 
-      const create = button('创建隧道', async () => {
+      const generated = el('div', { class: 'stack' });
+      const name2 = name; // 生成时也用它当链接里的标签
+
+      // ① 自动生成：一次给全套参数（REALITY 密钥对 + UUID + shortId + SOCKS 凭据），
+      //    并把服务端 config.json 与 vless:// 链接一起显示出来，省掉手工拆字段。
+      const generate = button('① 自动生成参数', async () => {
+        try {
+          const g = await ctx.api.generateTunnel({
+            server: server.value.trim() || undefined,
+            sni: sni.value.trim() || undefined,
+            name: name2.value.trim() || undefined,
+          });
+          uuid.value = g.uuid;
+          publicKey.value = g.publicKey;
+          shortId.value = g.shortId;
+          sni.value = g.sni;
+          socksUser.value = g.socksUser;
+          socksPass.value = g.socksPass;
+          if (!server.value.trim()) server.value = g.server;
+          toast('已生成并填入；请把服务端配置粘到你的服务器上');
+
+          const block = (label: string, text: string, rows: number) => {
+            const ta = el('textarea', { class: 'input mono', attrs: { readonly: '', rows: String(rows) } }) as HTMLTextAreaElement;
+            ta.value = text;
+            return el(
+              'div',
+              { class: 'stack' },
+              el('div', { class: 'field-label', text: label }),
+              ta,
+              button('复制', async () => {
+                const ok = await copyText(text);
+                toast(ok ? `已复制${label}` : '复制失败：请手动选中后复制', ok ? 'ok' : 'err');
+              }),
+            );
+          };
+
+          generated.replaceChildren(
+            el(
+              'div',
+              { class: 'hint hint-warn' },
+              el('div', { class: 'hint-title', text: '私钥只显示这一次（控制台不保存）' }),
+              el('div', {
+                class: 'hint-detail',
+                text:
+                  '下面的服务端配置里含 REALITY 私钥：请立刻粘到服务器的 config.json 并重启 xray，' +
+                  '然后点 ② 创建隧道。私钥不要提交到 git、不要留在聊天记录里。',
+              }),
+            ),
+            block('vless:// 分享链接（导入官方客户端 / xrayTun）', g.vlessLink, 3),
+            block('服务端 config.json（粘到服务器）', JSON.stringify(g.serverConfig, null, 2), 14),
+            block('客户端 config.json（用官方 Xray 先验证服务端）', JSON.stringify(g.clientConfig, null, 2), 12),
+            el(
+              'ul',
+              { class: 'notes' },
+              ...g.notes.map((n) => el('li', { text: n })),
+            ),
+          );
+        } catch (e) {
+          toast(`生成失败：${errorText(e)}`, 'err');
+        }
+      }, 'primary');
+
+      const create = button('② 创建隧道', async () => {
         try {
           await ctx.api.createTunnel({
             name: name.value.trim(),
@@ -359,6 +421,8 @@ export function xrayView(): ViewInstance {
               'div',
               { class: 'stack' },
               el('div', { class: 'grid-2-tight' }, field('名称', name), field('副本（≥2 缓解单连接限制）', replicas)),
+              generate,
+              generated,
               field('vless:// 链接（可选）', vlessLink, '粘贴后自动填下面几项；也可以手工填'),
               field('服务端地址', server, 'VLESS + REALITY 的 ip:port'),
               field('UUID', uuid),

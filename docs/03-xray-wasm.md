@@ -54,7 +54,34 @@ kubectl -n kube-system get pods | grep svclb            # 应为空
 
 想保留 Traefik 的 80/443 LB 又想自己用 443，就得换一台机器/换一个 IP 了。
 
-## 3. 已知限制（部署前必读）
+## 3. 面板上的「自动生成参数」
+
+新建隧道前不用手工凑参数——点 **① 自动生成参数**（等价于 `POST /api/xray/generate`），
+它会一次给出配套的一整套：
+
+| 产物 | 用途 |
+|---|---|
+| REALITY **X25519 密钥对** | 私钥给服务端 `privateKey`，公钥 `pbk` 给客户端 |
+| UUID / shortId / SNI | 两端共用 |
+| SOCKS5 用户名+密码 | 只用于**集群内**这条隧道的入口认证 |
+| 服务端 `config.json` | 可直接粘到服务器（含 `dest` 回落站点、`flow=xtls-rprx-vision`） |
+| 客户端 `config.json` | 官方 Xray 的等价配置，用来先验证服务端 |
+| `vless://` 链接 | 导入官方客户端 / xrayTun |
+
+实现要点：
+
+- 随机数走宿主的 `wasi:random`（不引 getrandom/rand），密钥对用 `x25519-dalek` 在 wasm 里算
+- **私钥只在响应里出现一次，控制台不保存、不写集群**；UI 上明确标红提示"别提交进 git"
+- `b64url`、UUIDv4 位、`生成→解析` 自洽性、服务端配置内容都有单测覆盖
+
+实测（真集群）：生成 → 用生成的**私钥**起一个 REALITY 服务端 → 用生成的**公钥**参数经面板建隧道
+→ 经它出网 HTTP 200。也就是说生成的参数是配套可用的，不是"看着对"。
+
+> 顺带修了一个真 bug：`parse_vless_link` 之前没剥 `#fragment`，导致最后一个 query 参数被污染
+> （`flow=xtls-rprx-vision#Xray`）。是新增的「生成→解析」往返单测把它抓出来的 —— 之前那条
+> 只断言了 uuid/pbk/sid/sni，恰好漏过 flow。
+
+## 4. 已知限制（部署前必读）
 
 - **一次只处理一条连接**：wasip2 没有线程，当前是顺序 accept。长连接客户端（HTTP/2、keep-alive）
   会独占一个 Pod。缓解：`replicas ≥ 2`。
@@ -65,7 +92,7 @@ kubectl -n kube-system get pods | grep svclb            # 应为空
 - **`XT_CLIENT_VER` 要对齐**服务端 `minClientVer/maxClientVer`（默认 `26.3.27`），
   设错的症状是「证书不是 Ed25519」。
 
-## 4. 连接方式
+## 5. 连接方式
 
 部署后（假设 Service 名 `xray-wasm`、命名空间 `xray`、端口 1080）：
 
@@ -86,7 +113,7 @@ ssh -N -L 1080:$(kubectl -n xray get svc xray-wasm -o jsonpath='{.spec.clusterIP
 > 为什么不做成 NodePort/LoadBalancer：那等于把你的出口代理公开给全网。
 > 需要长期外部访问的话，用 WireGuard/Tailscale 之类把节点网络接通，再走 ② 或 ③。
 
-## 5. 换到自己的服务端
+## 6. 换到自己的服务端
 
 ```bash
 kubectl -n xray create secret generic xray-wasm \
