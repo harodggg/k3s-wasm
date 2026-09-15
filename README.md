@@ -104,6 +104,9 @@ make e2e                          # 31 项端到端断言（真实 wasm 宿主�
 - **WASM 运行时**：RuntimeClass ↔ 可调度节点数 ↔ 是否错配
 - **工作负载**：Deployment 列表，可按命名空间过滤、只看 wasm
 - **Spin 应用**：创建 / 扩缩 / 删除 SpinApp（含 executor 选择，因为 runtimeClassName 来自 executor）
+- **翻墙 / 隧道 两种模式**（都是 wasm，同一个模块两个方向）：翻墙 = REALITY 入站 → 直连出
+  （选节点 + NodePort 公网入口，凭据只进 Secret，链接**不带 flow**）；隧道 = SOCKS5 入站 → REALITY 出。
+  列表按模式标出方向（入站/出站）、实现与入口
 - **Xray 隧道**：把 `xray-wasm` 作为 wasm 工作负载下发（Secret + Deployment + ClusterIP Service + NetworkPolicy）；
   列表区分**出站**（集群内 → 经 REALITY 出网）与**入站暴露面**（ClusterIP=仅集群内 / NodePort=公网可达，会标红）
 - **网络拓扑**：把 Ingress → Service → 工作负载 → 节点 与 NetworkPolicy 画成一张图，

@@ -251,6 +251,22 @@ check_post "创建隧道（会下发 ConfigMap + Deployment + Service）" /api/x
     '{"name":"e2e-tokyo","namespace":"k3s-wasm","server":"203.0.113.9:443","uuid":"11111111-2222-3333-4444-555555555555","publicKey":"PUBKEY","shortId":"abcd1234","sni":"www.example.com","listen":"0.0.0.0:1080","replicas":1,"socksUser":"e2e","socksPass":"e2e-pass"}' \
     '.data.created==true and (.data.socksEndpoint|test(":1080"))'
 check_post "隧道扩容" /api/xray/tunnels/k3s-wasm/e2e-tokyo/scale '{"replicas":2}' '.ok==true'
+
+# ── 翻墙模式（xray-wasm 的 REALITY 服务端：REALITY 入 → 直连出）──
+check_post "创建翻墙入口（wasm REALITY 服务端）" /api/xray/tunnels \
+    '{"mode":"walljump","name":"e2e-wj","namespace":"k3s-wasm","nodePort":30543,"sni":"www.cloudflare.com"}' \
+    '.data.created==true and .data.mode=="walljump" and (.data.entry|test(":30543")) and (.data.dest|test("cloudflare"))'
+# 关键约束：翻墙链接**不带 flow**（服务端未实现 XTLS-Vision 流控），客户端配置同理
+check_post "翻墙链接不带 flow（服务端不实现 Vision 流控）" /api/xray/tunnels \
+    '{"mode":"walljump","name":"e2e-wj2","namespace":"k3s-wasm","nodePort":30544}' \
+    '((.data.vlessLink|test("flow="))|not) and ((.data.clientConfig.outbounds[0].settings.vnext[0].users[0]|has("flow"))|not) and (.data.vlessLink|test("security=reality"))'
+check_json "列表把翻墙项标成入站 REALITY + wasm" /api/xray/tunnels \
+    '([.data.items[]|select(.name=="e2e-wj")][0] | .mode=="walljump" and .direction=="ingress" and .isWasm==true and (.impl|test("服务端")))'
+check_json "modes 元数据写清两种模式与 flow 约束" /api/xray/tunnels \
+    '([.data.modes[]|select(.id=="walljump")][0].flowNote|test("flow")) and ([.data.modes[]|select(.id=="tunnel")]|length)==1'
+check_delete "删除翻墙入口（Deployment+Service+NetworkPolicy）" /api/xray/tunnels/k3s-wasm/e2e-wj \
+    '.data.deleted|index("deployment")!=null and index("service")!=null'
+check_delete "清理第二个翻墙测试项" /api/xray/tunnels/k3s-wasm/e2e-wj2 '.ok==true'
 check_delete "删除隧道（Deployment+Service+NetworkPolicy）" /api/xray/tunnels/k3s-wasm/e2e-tokyo '.data.deleted|index("deployment")!=null and index("service")!=null'
 
 echo

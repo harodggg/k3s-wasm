@@ -181,26 +181,58 @@ ssh -N -L 1080:$(kubectl -n xray get svc xray-wasm -o jsonpath='{.spec.clusterIP
 读 Secret 的权限是**命名空间级 Role**（`k3s-wasm-tunnel-secrets`，只 `get`），不是集群级
 `get secrets` —— 后者等于能读全集群密钥。在别的命名空间建隧道时，把这份 Role/RoleBinding 复制过去。
 
-## 8. ⚠️ 两种模式：翻墙 vs 隧道（实现边界，务必看清）
+## 8. 两种模式：翻墙 vs 隧道（现在**都是 wasm**）
 
-| 模式 | 入站 | 出站 | 现状 |
-|---|---|---|---|
-| **翻墙** | **REALITY**（你在国内直接连节点公网 IP） | **直连 socket**（从该节点的网络出网） | ❗**wasm 侧做不到** —— 见下 |
-| **隧道** | **SOCKS5**（集群内客户端） | **REALITY**（连远端 REALITY 服务端） | ✅ 就是本仓库已实现并实测的 `xray-wasm` |
+| 模式 | 入站 | 出站 | 实现 | 链接里的 `flow` |
+|---|---|---|---|---|
+| **翻墙** | **REALITY**（NodePort，pod 内 8443） | **直连**（走所选节点自己的网络） | 同一个 wasm 组件，`XT_MODE=server` | **必须不带** |
+| **隧道** | **SOCKS5**（ClusterIP / NodePort，1080） | **REALITY**（连远端服务端） | 同一个 wasm 组件，默认（客户端） | 上游是 stock Xray 时可带 `xtls-rprx-vision` |
 
-为什么"翻墙"模式不能用 `xray-wasm` 实现：它是**客户端**（SOCKS5 服务端 + REALITY 客户端），
-`REALITY 入 → 直连出` 需要一个 **REALITY 服务端**（TLS 服务端 + X25519 证明 + VLESS/Vision 服务端），
-`xray-wasm` 里没有这个方向。官方 Xray 是 Go 写的，也编不到 wasip2
-（Go 只支持 `wasip1`，而 wasip1 在标准库层面就发不出站 TCP —— 这正是本项目当初选 wasip2 的原因）。
-所以"翻墙"模式只能是**非 wasm**的：
+### 8.1 为什么两者能共用一个模块
 
-* **当前节点上的做法**：官方 Xray 二进制以 systemd 常驻在节点上（`/opt/xray-test`），
-  443 由 Traefik 按 SNI 做 TLS 直通转给它 —— 这就是"REALITY 入 → 直连出"，实测可用
-  （外网 `SNI=www.cloudflare.com` → HTTP 200 + 真实 Cloudflare 证书）。
-* **要在集群里做成"一等公民"**：把官方 Xray 作为**普通容器 Deployment** 部署（不是 wasm 工作负载），
-  用 NodePort / Traefik 直通暴露到节点公网 IP，控制台负责生成配置与 `vless://` 链接。
+`xray-wasm` **v0.4.0** 起，一个 `xt-wasm-cli.wasm` 同时是客户端与服务端：
 
-本仓库的控制台目前只把**隧道**做成了面板功能；"翻墙"是节点级实现，未进控制台。
+```sh
+# 客户端（隧道模式）：本地 SOCKS5 → REALITY 出
+xt-wasm-cli --server <远端 ip:port> --pbk <公钥> --sid <shortId> --sni <域名> --uuid <uuid> [--listen 0.0.0.0:1080]
+
+# 服务端（翻墙模式）：REALITY 入 → 直连目标；未认证流量原样转发到 dest
+xt-wasm-cli server --private-key <base64url> --short-ids <hex> --server-names <域名> \
+                   --dest <真实 TLS 站点:443> --users <uuid> [--listen 0.0.0.0:8443]
+```
+
+服务端所有参数都有对应**环境变量**（`XT_MODE=server` / `XT_PRIVATE_KEY` / `XT_SHORT_IDS` /
+`XT_SERVER_NAMES` / `XT_DEST` / `XT_USERS` / `XT_SERVER_LISTEN`），所以控制台把凭据整包放进
+Secret、用 `envFrom` 注入，**args 里不放任何凭据**（`kubectl describe pod` 会打印 args）。
+
+### 8.2 三条实测约束（决定面板怎么生成链接）
+
+1. **翻墙链接不带 `flow`**：xray-wasm 服务端**尚未实现** XTLS-Vision 流控，带非空 `flow`
+   的客户端会被**明确拒绝**（服务端日志：`Not supported: 服务端尚未实现 Vision 流控（客户端请求了
+   flow=xtls-rprx-vision）`），不是静默降级。面板据此生成无 flow 的链接与客户端配置。
+2. **入口用 NodePort，不用 hostPort**：本集群命名空间带 PodSecurity `baseline` 强制，
+   `hostPort` 会被准入直接拒掉（实测 `violates PodSecurity "baseline:latest": hostPort`）。
+3. **调度需要 wasm 节点**：翻墙模式跑的是 wasm 组件，而 `wasmtime-wasip2` 这个 RuntimeClass
+   自带 `nodeSelector: wasm.sh/wasmtime=true`；选到没有该标签的节点会一直 Pending，
+   所以控制台在创建前就校验并给出可读的 400。
+
+### 8.3 真机验证（k3s v1.36.4 + Cilium 1.20.1）
+
+| 项目 | 结果 |
+|---|---|
+| 发布产物 sha256 校验 | ✅ `xt-wasm-cli.wasm` v0.4.0 |
+| `server` 子命令在**发布产物**里 | ✅ `server --help` 参数完整 |
+| stock Xray 客户端（flow 空）→ wasm 服务端 → 直连出 | ✅ 出口 = 节点 IP（`wasmtime run` 与 k3s shim 两种宿主都通过） |
+| flow 非空 | ✅ 明确拒绝（见 8.2 第 1 条） |
+| 未认证探测 | ✅ 集群内与公网都看到 `dest` 的真实证书（回落行为，抗主动探测） |
+| k3s 交付 | ✅ `wasmtime-wasip2` 下 1/1 Running；guest stdout 进 `kubectl logs`；NodePort 公网可达 |
+| **shim 内 DNS** | ✅ 目标用域名也能通（这一条曾是未知项：`wasi.rs` 里写明域名解析需要宿主开 `allow-ip-name-lookup`，实测 shim 提供了） |
+
+### 8.4 与官方核心的关系
+
+官方 Xray 核心（Go）编不到 wasip2（Go 只支持 `wasip1`，而 wasip1 标准库层面发不出站 TCP），
+所以「REALITY 服务端也是 wasm」这件事只能由 xray-wasm 自己实现 —— 也就是 v0.4.0 做的。
+节点上那套 systemd + 官方二进制（`/opt/xray-test`）现在只是历史遗留，不再是翻墙模式的唯一路径。
 
 ## 9. 镜像现在是下拉可选
 

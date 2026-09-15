@@ -39,6 +39,9 @@
 | 自己起的服务在 443/80 上「绑定成功」却收不到外部流量；TLS 探测拿到的是 `CN=TRAEFIK DEFAULT CERT` | k3s servicelb 的 hostPort 由 **Cilium 在 BPF 里**实现，**`ss` 看不到监听者**（所以我们误判 443 空闲）。Traefik 的 LB Service 占着 80/443 | 换端口（实测 8443 可用），或先确认 80/443 真的没人用：`kubectl -n kube-system get svc traefik` 看它的 LB 端口；不要只信 `ss` |
 | `Kubernetes API 返回 403（Forbidden）` | ClusterRole 权限不足 | 报错里带着 k8s 原文（哪个资源、哪个动词），照它加 `deploy/base/kube-api-proxy.yaml` 里的 rules |
 | UI 显示「kube-api-proxy 地址用的是编译期默认值」 | 没有设置 `K8S_PROXY_URL`，正在用默认的 in-cluster 地址 | 标准部署无需处理；非标准命名空间设 env 或构建时烘焙 |
+| 服务端日志 `Not supported: 服务端尚未实现 Vision 流控（客户端请求了 flow=xtls-rprx-vision）` | xray-wasm **服务端**尚未实现 XTLS-Vision 流控，带非空 `flow` 的客户端被明确拒绝（不是静默降级） | 客户端的 `flow` 留空。控制台生成的**翻墙**链接已经不带 flow；手工改过链接/配置的要检查 `flow=xtls-rprx-vision` 是否被粘回去 |
+| 翻墙模式的 Pod 一直 Pending | 选到的节点没有 wasm 运行时标签，而 RuntimeClass `wasmtime-wasip2` 自带 `nodeSelector: wasm.sh/wasmtime=true` | 在节点上跑 `scripts/install-wasm-runtime.sh`，或换节点。控制台在创建时会先校验并回可读的 400 |
+| 以为「wasmtime shim 没有 DNS」，于是把服务端 `dest`/目标写成 IP | 那条结论只适用于 **`wasi:http` 出站路径**（组件用域名访问 kube-api-proxy 会挂住） | **raw socket 的域名解析在 shim 里是可用的**：翻墙服务端解析 `dest` 与请求目标域名都正常（实测）。所以 `dest` 直接写真实站点域名即可 |
 | 页面横幅「自动刷新失败：Cannot convert undefined or null to object」 | 视图里对**后端返回的 map 字段**直接用了 `Object.entries`，而该字段是 `null`（例如 k3s 内置 RuntimeClass 的 `nodeSelector`）。自动刷新每 5 秒重放一次，于是横幅常驻 | 用 `dom.ts` 的 `pairsText()` 渲染后端来的 map；后端也保证这类字段发 `{}` 而不是 `null`。CI 里有 `check-no-raw-object-entries.mjs` 守卫防止复发 |
 | 前端白屏，页面显示「前端资源未构建」 | 构建 wasm 时 `ui/frontend/dist` 不存在（build.rs 写入了占位页） | `cd ui/frontend && npm ci && npm run build`，再重新 `cargo build --release --target wasm32-wasip2`；或用 `make ui` |
 | 前端 fetch 报 `Unexpected token '<'` | 请求打到了静态资源回退（返回 HTML） | 未知 `/api/*` 现在会返回 JSON 404；若仍出现，确认路径拼写与 `lib.rs` 路由表 |

@@ -104,6 +104,8 @@ export interface NodeInfo {
   os: string;
   kubeletVersion: string;
   runtime: string;
+  /** k8s 的 NodeStatus.addresses；翻墙模式要从中取 InternalIP 展示给用户 */
+  addresses?: { type: string; address: string }[];
   capacity: { cpu: string; memory: string; pods: string };
   wasm: { spin: boolean; wasmtime: boolean };
   /** GPU 存在性：由节点标签/容量推导（present=false 时 count 恒为 0） */
@@ -211,8 +213,25 @@ export interface TunnelExposure {
   public: boolean | null;
 }
 
+/** 两种模式用同一个 wasm 组件：翻墙跑服务端（REALITY 入站），隧道跑客户端（SOCKS5 入站） */
+export type TunnelMode = 'walljump' | 'tunnel';
+
+/** GET /api/xray/tunnels 的 modes[]：模式语义由后端定义，面板直接渲染，避免前后端各写一套 */
+export interface XrayModeInfo {
+  id: string;
+  label: string;
+  impl?: string;
+  runtimeClass?: string;
+  entry?: string;
+  who?: string;
+  nodeRequirement?: string;
+  flowNote?: string;
+}
+
 export interface XrayTunnel {
   kind: string;
+  /** walljump = 入站 REALITY → 直连出；tunnel = SOCKS5 入站 → 经 REALITY 出 */
+  mode?: TunnelMode;
   name: string;
   namespace: string;
   replicas: number;
@@ -220,10 +239,13 @@ export interface XrayTunnel {
   image: string | null;
   runtimeClass: string;
   createdAt: string;
+  impl?: string;
+  /** 仅翻墙：入口（NodePort）所在的节点 */
+  node?: string | null;
   tunnel: TunnelView;
   managedBy: string;
   isWasm: boolean;
-  /** 目前恒为 "egress"：xray-wasm 是客户端，只能把集群内流量送出去 */
+  /** ingress = 翻墙（公网 REALITY 入口）；egress = 隧道（集群内流量经 REALITY 出网） */
   direction: string;
   directionLabel: string;
   egress: { via: string | null; protocol: string; note: string };
@@ -267,12 +289,19 @@ export interface GenerateTunnelBody {
 export interface TunnelVless {
   name: string;
   namespace: string;
+  mode?: TunnelMode;
+  impl?: string;
+  /** 客户端 config.json；翻墙模式下不含 flow（服务端未实现 XTLS-Vision 流控） */
+  clientConfig?: Record<string, unknown>;
   vlessLink: string;
   server: string;
+  /** 客户端实际连的地址，可能不同于链接里的对外地址 */
+  clientServer?: string;
   sni: string;
   shortId: string;
   publicKey: string;
   socksUser: string;
+  /** 翻墙模式没有 SOCKS5 入口，后端给空串 —— 前端据此隐藏 SOCKS5 相关按钮 */
   socksEndpoint: string;
   note: string;
 }
@@ -280,6 +309,8 @@ export interface TunnelVless {
 export interface XrayList {
   items: XrayTunnel[];
   shim: { runtimeClass: string; requiredNodeLabel: string };
+  /** 两种模式的语义说明，面板直接渲染 */
+  modes?: XrayModeInfo[];
 }
 
 /** 集群里正在运行的 Pod 所用镜像（下拉建议的来源） */
@@ -413,6 +444,8 @@ export interface CreateSpinAppBody {
 }
 
 export interface CreateTunnelBody {
+  /** 缺省即 tunnel；显式传避免依赖后端默认值 */
+  mode?: TunnelMode;
   name: string;
   namespace?: string;
   /** 可直接粘贴 xray-deploy 输出的 vless:// 链接，server/uuid/pbk/sid/sni 会自动补全 */
@@ -439,19 +472,73 @@ export interface CreateTunnelBody {
   allowFrom?: string;
 }
 
+/** 翻墙模式：入站 REALITY（NodePort），出站直连，跑的是同一个 wasm 组件的服务端形态 */
+export interface CreateWalljumpBody {
+  mode: 'walljump';
+  name: string;
+  namespace?: string;
+  /** 节点名；缺省由后端选第一个 Ready 节点 */
+  node?: string;
+  /** 30000-32767，默认 30543（hostPort 被本集群 PodSecurity baseline 禁止） */
+  nodePort?: number;
+  /** 伪装站点，默认 www.cloudflare.com */
+  sni?: string;
+  /** 回落目标，默认 <sni>:443 */
+  dest?: string;
+  /** 对外地址；缺省用面板访问地址 / 节点 IP */
+  publicHost?: string;
+  /** 复用已有服务端的 REALITY 私钥（base64url），不传就现生成 */
+  privateKey?: string;
+  uuid?: string;
+  shortId?: string;
+  image?: string;
+  runtimeClassName?: string;
+  replicas?: number;
+  allowFrom?: string;
+  secretName?: string;
+}
+
 /** 创建隧道后的连接方式（后端从请求 Host 推出节点地址） */
 export interface CreatedTunnel {
   created: boolean;
+  mode?: TunnelMode;
   namespace: string;
   name: string;
-  secret: string;
+  secret?: string;
   socksEndpoint: string;
-  portForward: string;
-  expose: 'cluster' | 'nodeport';
-  externalEndpoint: string | null;
-  allowFrom: string | null;
-  usage: string;
-  note: string;
+  portForward?: string;
+  expose?: 'cluster' | 'nodeport';
+  externalEndpoint?: string | null;
+  allowFrom?: string | null;
+  usage?: string;
+  note?: string;
+  /** NetworkPolicy 等附属资源创建失败时的可读原因（主体已建好） */
+  warning?: string;
+}
+
+/** 创建翻墙入口后的结果：vless 链接 + 无 flow 的客户端配置 */
+export interface CreatedWalljump {
+  created: boolean;
+  mode: 'walljump';
+  namespace: string;
+  name: string;
+  node?: string;
+  entry: string;
+  nodePort: number;
+  publicHost?: string;
+  sni?: string;
+  dest?: string;
+  shortId?: string;
+  uuid?: string;
+  publicKey?: string;
+  /** 故意不带 flow：xray-wasm 服务端未实现 XTLS-Vision 流控 */
+  vlessLink: string;
+  clientConfig: Record<string, unknown>;
+  impl?: string;
+  direction?: string;
+  usage?: string;
+  note?: string;
+  warning?: string;
 }
 
 // ── 认证（WebAuthn / Touch ID） ──────────────────────────────────────
@@ -609,6 +696,9 @@ export const api = {
   tunnels: (namespace?: string) => request<XrayList>(`/api/xray/tunnels${q({ namespace })}`),
   generateTunnel: (body: GenerateTunnelBody) => post<GeneratedTunnel>('/api/xray/generate', body),
   createTunnel: (body: CreateTunnelBody) => post<CreatedTunnel>('/api/xray/tunnels', body),
+  /** 同一个 POST /api/xray/tunnels，mode=walljump；响应字段与隧道完全不同，所以单独一个方法 */
+  createWalljumpTunnel: (body: CreateWalljumpBody) =>
+    post<CreatedWalljump>('/api/xray/tunnels', body),
   scaleTunnel: (ns: string, name: string, replicas: number) =>
     post<unknown>(`/api/xray/tunnels/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/scale`, { replicas }),
   tunnelVless: (ns: string, name: string) =>

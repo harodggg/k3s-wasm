@@ -30,7 +30,7 @@ const ROUTES: Route[] = [
   { hash: '#/workloads', label: '工作负载', factory: () => workloadsView() },
   { hash: '#/topology', label: '网络拓扑', factory: () => topologyView() },
   { hash: '#/spinapps', label: 'Spin 应用', factory: () => spinAppsView() },
-  { hash: '#/xray', label: 'Xray 隧道', factory: () => xrayView() },
+  { hash: '#/xray', label: 'Xray 翻墙/隧道', factory: () => xrayView() },
   { hash: '#/logs', label: '日志', factory: (p) => logsView(p) },
   { hash: '#/events', label: '事件', factory: () => eventsView() },
 ];

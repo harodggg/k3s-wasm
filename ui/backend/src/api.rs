@@ -996,6 +996,54 @@ fn xray_shape(dep: &Value, svc: Option<&Value>) -> Value {
     let ns = dep["metadata"]["namespace"].as_str().unwrap_or_default();
     let name = dep["metadata"]["name"].as_str().unwrap_or_default();
 
+    // 翻墙模式：方向与隧道相反 —— 入站 REALITY（公网入口），出站直连（走该节点自己的网络）。
+    // 实现同样是 wasm（xray-wasm 的服务端模式），所以 isWasm 仍为 true。
+    if ann["k3s-wasm/mode"].as_str() == Some("walljump") {
+        let entry = ann["k3s-wasm/public-server"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| ann["k3s-wasm/server"].as_str().unwrap_or(""));
+        return json!({
+            "kind": "xray-tunnel",
+            "mode": "walljump",
+            "name": dep["metadata"]["name"],
+            "namespace": dep["metadata"]["namespace"],
+            "replicas": spec["replicas"].as_i64().unwrap_or(1),
+            "readyReplicas": status["readyReplicas"].as_i64().unwrap_or(0),
+            "image": spec["template"]["spec"]["containers"].as_array()
+                .and_then(|c| c.first()).map(|c| c["image"].clone()).unwrap_or(Value::Null),
+            "runtimeClass": spec["template"]["spec"]["runtimeClassName"],
+            "impl": "xray-wasm（wasm32-wasip2，REALITY 服务端）",
+            "node": ann["k3s-wasm/node"],
+            "createdAt": dep["metadata"]["creationTimestamp"],
+            "tunnel": {
+                "server": ann["k3s-wasm/server"],
+                "sni": ann["k3s-wasm/sni"],
+                "shortId": ann["k3s-wasm/short-id"],
+                "listen": listen,
+                "hasUuid": true,
+            },
+            "managedBy": MANAGED_BY,
+            "isWasm": true,
+            "direction": "ingress",
+            "directionLabel": "入站（REALITY 入 → 直连出）",
+            "egress": {
+                "via": "直连（该节点自己的网络）",
+                "protocol": "VLESS+REALITY → 直连目标（无第二跳）",
+                "note": "客户端从公网连进来，出口就是这台节点的网络；未认证流量回落到 dest 站点",
+            },
+            "ingress": {
+                "endpoint": entry,
+                "exposure": shape_exposure(svc, port),
+            },
+            "usage": {
+                "outbound": false,
+                "inbound": true,
+                "allowFrom": ann["k3s-wasm/allow-from"],
+            },
+        });
+    }
+
     json!({
         "kind": "xray-tunnel",
         "name": dep["metadata"]["name"],
@@ -1015,6 +1063,8 @@ fn xray_shape(dep: &Value, svc: Option<&Value>) -> Value {
             "hasUuid": true,
         },
         "managedBy": MANAGED_BY,
+        "mode": "tunnel",
+        "impl": "xray-wasm（wasm32-wasip2，REALITY 客户端）",
         "isWasm": true,
         // ── 方向 ───────────────────────────────────────────────────
         // 出站：流量从集群内 → 经 REALITY 服务端 → 目标（本面板创建的就是这个方向）
@@ -1077,10 +1127,33 @@ pub fn xray_list(req: &Request) -> Response {
     Response::ok(json!({
         "items": items,
         "shim": {
-            // xray-wasm 是命令式 wasm（自己监听 SOCKS5），必须跑在 wasmtime 运行时上
+            // xray-wasm 是命令式 wasm（自己监听端口），必须跑在 wasmtime 运行时上
             "runtimeClass": "wasmtime-wasip2",
             "requiredNodeLabel": "wasm.sh/wasmtime=true",
         },
+        // 两种模式的语义（面板用的就是这份定义，避免前后端各写一套）
+        "modes": [
+            {
+                "id": "walljump",
+                "label": "翻墙（REALITY 入站 → 直连出）",
+                "impl": "xray-wasm（服务端模式 XT_MODE=server）",
+                "runtimeClass": "wasmtime-wasip2",
+                "entry": "NodePort（节点公网 IP:端口）",
+                "who": "你自己：在国内直连这个公网入口，出口走该节点的网络",
+                "nodeRequirement": "需要装了 wasm 运行时（wasm.sh/wasmtime=true）且建议有公网 IP 的节点",
+                "flowNote": "链接必须不带 flow（服务端未实现 XTLS-Vision 流控）",
+            },
+            {
+                "id": "tunnel",
+                "label": "隧道（SOCKS5 入站 → REALITY 出）",
+                "impl": "xray-wasm（客户端模式）",
+                "runtimeClass": "wasmtime-wasip2",
+                "entry": "ClusterIP / NodePort（SOCKS5 代理）",
+                "who": "集群内的 Pod（或外部客户端）：流量经远端 REALITY 出网",
+                "nodeRequirement": "任意带 wasm 运行时的节点",
+                "flowNote": "上游是 stock Xray 时可用 flow=xtls-rprx-vision；上游若是 xray-wasm 服务端则必须留空",
+            },
+        ],
     }))
 }
 
@@ -1116,6 +1189,18 @@ pub fn xray_create(req: &Request) -> Response {
         Err(m) => return Response::fail(400, m),
     };
     let (cfg, k8s) = client();
+
+    // 两种模式（语义由使用者定义）：
+    //   walljump 翻墙：入站 REALITY → 出站 **直连**（国内直连公网入口，出口走该节点网络）
+    //   tunnel   隧道：入站 SOCKS5  → 出站 REALITY（集群内流量经远端 REALITY 出网）
+    //
+    // 两者用的是**同一个 wasm 组件**（xray-wasm v0.4.0 起一个二进制两个方向）：
+    //   翻墙 = `XT_MODE=server`（服务端），隧道 = 默认（客户端）。
+    // 这也是为什么翻墙模式的 vless 链接**不带 flow**：该服务端未实现 XTLS-Vision 流控。
+    let mode = body["mode"].as_str().unwrap_or("tunnel").to_lowercase();
+    if mode == "walljump" || mode == "reality" || mode == "server" || mode == "ingress" {
+        return xray_create_walljump(req, &body, &cfg, &k8s);
+    }
 
     // 支持直接粘贴 vless:// 链接（`server`/`uuid` 等字段也就自动补全）
     let body = match body["vlessLink"].as_str().filter(|s| !s.is_empty()) {
@@ -1403,6 +1488,9 @@ pub fn xray_create(req: &Request) -> Response {
 
     Response::ok(json!({
         "created": true,
+        "mode": "tunnel",
+        "impl": "xray-wasm（wasm32-wasip2，REALITY 客户端）",
+        "direction": "SOCKS5 入站 → REALITY 出站",
         "namespace": namespace,
         "name": name,
         "secret": secret_name,
@@ -1420,6 +1508,422 @@ pub fn xray_create(req: &Request) -> Response {
             "仅集群内可用（ClusterIP）。要用它翻墙/给本机用：改用途为 nodeport，或用 port-forward / SSH 隧道。"
         },
     }))
+}
+
+/// 翻墙模式：把 xray-wasm 以 **REALITY 服务端**形态部署（`XT_MODE=server`），
+/// 入站 REALITY、出站直连 —— 也就是「国内直连这台公网入口，出去走这个节点的网络」。
+///
+/// 与隧道模式共用同一个 wasm 组件（v0.4.0 起一个二进制两个方向），差别只在：
+///   ① `XT_MODE=server` + 服务端凭据（私钥/shortIds/serverNames/dest/users）
+///   ② 入口是 **NodePort**（REALITY 监听在 pod 内 8443），不是 SOCKS5
+///   ③ 生成的 vless 链接**不带 flow**（该服务端未实现 XTLS-Vision 流控，带了会被明确拒绝）
+///
+/// 入口为什么用 NodePort 而不是 hostPort：本集群命名空间带 PodSecurity `baseline`
+/// 强制，`hostPort` 会被准入直接拒掉（实测 `violates PodSecurity "baseline:latest": hostPort`）。
+fn xray_create_walljump(req: &Request, body: &Value, cfg: &Config, k8s: &K8s) -> Response {
+    let name = match required_str(body, "name") {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let namespace = body["namespace"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&cfg.default_namespace)
+        .to_string();
+    if !is_dns1123_label(&name) || !is_dns1123_label(&namespace) {
+        return Response::fail(400, "name / namespace 必须是合法 DNS-1123 名称");
+    }
+
+    // ── 节点：翻墙要跑在有公网 IP 的节点上，而且必须装了 wasm 运行时 ──
+    let nodes = match k8s.get("/api/v1/nodes") {
+        Ok(v) => v,
+        Err(e) => return from_err(e),
+    };
+    let items = nodes["items"].as_array().cloned().unwrap_or_default();
+    if items.is_empty() {
+        return Response::fail(502, "读不到任何节点（集群 API 返回空）");
+    }
+    let want_node = body["node"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let node_obj = match want_node {
+        Some(n) => match items.iter().find(|x| x["metadata"]["name"].as_str() == Some(n)) {
+            Some(o) => o.clone(),
+            None => {
+                let avail: Vec<&str> = items
+                    .iter()
+                    .filter_map(|x| x["metadata"]["name"].as_str())
+                    .collect();
+                return Response::fail(400, format!("节点 {n} 不存在；可用节点：{}", avail.join(", ")));
+            }
+        },
+        None => items
+            .iter()
+            .find(|x| node_ready(x))
+            .cloned()
+            .unwrap_or_else(|| items[0].clone()),
+    };
+    let node = node_obj["metadata"]["name"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    // 这个检查能省掉一轮「Pod 一直 Pending」的排查：翻墙模式跑的是 wasm 组件，
+    // 而 RuntimeClass wasmtime-wasip2 自带 nodeSelector=wasm.sh/wasmtime=true。
+    if !label_bool(&node_obj["metadata"]["labels"], "wasm.sh/wasmtime") {
+        return Response::fail(
+            400,
+            format!(
+                "节点 {node} 没有 wasm 运行时标签（wasm.sh/wasmtime=true），翻墙模式跑的是 wasm 组件，                 调度上去会一直 Pending。先在节点上跑 scripts/install-wasm-runtime.sh，或换一个节点。"
+            ),
+        );
+    }
+
+    // 对外地址：显式 publicHost > 请求 Host > 节点地址；跳过 localhost 这类只对本机有意义的
+    let host_header = req
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+        .map(|(_, v)| v.split(':').next().unwrap_or("").trim().to_string())
+        .filter(|h| !h.is_empty() && h != "localhost" && h != "127.0.0.1" && h != "[::1]");
+    let node_ip = node_addr(&node_obj, "InternalIP")
+        .or_else(|| node_addr(&node_obj, "ExternalIP"))
+        .unwrap_or_default();
+    let public_host = body["publicHost"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or(host_header)
+        .unwrap_or(node_ip);
+    if public_host.is_empty() {
+        return Response::fail(400, "无法确定对外地址：请显式传 publicHost（节点公网 IP 或域名）");
+    }
+
+    // ── 端口：容器内固定 8443；对外是 NodePort（30000-32767）──
+    let inner_port: u16 = 8443;
+    let node_port = body["nodePort"]
+        .as_u64()
+        .or_else(|| body["entryPort"].as_u64())
+        .unwrap_or(30543);
+    if !(30000..=32767).contains(&node_port) {
+        return Response::fail(
+            400,
+            format!("NodePort 必须落在 30000-32767，收到 {node_port}（hostPort 被本集群 PodSecurity baseline 禁止）"),
+        );
+    }
+    let node_port = node_port as u16;
+
+    // 伪装站点（SNI）与回落到此站点的真实 TLS 站点 —— 未通过认证的探测者看到它的证书
+    let sni = body["sni"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("www.cloudflare.com")
+        .to_string();
+    let dest = body["dest"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{sni}:443"));
+
+    // 私钥可复用（接管已有服务端）；不传就现生成一对
+    let (private_key, public_key) = match body["privateKey"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(pk) => match pubkey_from_private_key(pk) {
+            Some(pubk) => (pk.to_string(), pubk),
+            None => {
+                return Response::fail(
+                    400,
+                    "privateKey 必须是 base64url（无 padding）的 32 字节 X25519 私钥",
+                )
+            }
+        },
+        None => reality_keypair(),
+    };
+    let uuid = body["uuid"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid_from_bytes(&random_bytes(16)));
+    let short_id = body["shortId"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| bytes_to_hex(&random_bytes(8)));
+
+    let image = body["image"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        // v0.4.0 起同一个 wasm 模块同时支持客户端与服务端
+        .unwrap_or("docker.io/k3s-wasm/xray-wasm-cli:v0.4.0")
+        .to_string();
+    let runtime_class = body["runtimeClassName"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("wasmtime-wasip2")
+        .to_string();
+    let replicas = body["replicas"].as_i64().unwrap_or(1).clamp(1, 5);
+    // REALITY 入站按定义要对公网开放；放行来源仍可收窄（例如只放行你自己的出口 IP）
+    let allow_from = body["allowFrom"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("0.0.0.0/0")
+        .to_string();
+    let secret_name = body["secretName"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&name)
+        .to_string();
+    let entry = format!("{public_host}:{node_port}");
+
+    let labels = json!({
+        "app.kubernetes.io/name": name,
+        "app.kubernetes.io/part-of": XRAY_PART_OF,
+        "app.kubernetes.io/managed-by": MANAGED_BY,
+    });
+
+    // 1) Secret：**只有凭据**，全部走环境变量（args 里不放凭据：kubectl describe pod 会打印 args）
+    if body["secretName"].as_str().filter(|s| !s.is_empty()).is_none() {
+        let secret = json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": secret_name, "namespace": namespace, "labels": labels },
+            "type": "Opaque",
+            "stringData": walljump_env(&private_key, &short_id, &sni, &dest, &uuid, inner_port),
+        });
+        if let Err(e) = k8s.post(&format!("/api/v1/namespaces/{namespace}/secrets"), &secret) {
+            return Response::fail(
+                e.http_status(),
+                format!(
+                    "创建 Secret 失败：{}。可给控制台加 secrets 写权限，或先自建 Secret 再填「已有 Secret 名称」。",
+                    e.message()
+                ),
+            );
+        }
+    }
+
+    // 2) Deployment：wasm 组件（REALITY 服务端跑在 wasmtime shim 上）
+    let deployment = json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "labels": labels,
+            "annotations": {
+                "k3s-wasm/mode": "walljump",
+                "k3s-wasm/impl": "xray-wasm-server",
+                "k3s-wasm/node": node,
+                "k3s-wasm/server": entry,
+                "k3s-wasm/sni": sni,
+                "k3s-wasm/dest": dest,
+                "k3s-wasm/short-id": short_id,
+                "k3s-wasm/listen": format!("0.0.0.0:{inner_port}"),
+                "k3s-wasm/entry-port": node_port.to_string(),
+                "k3s-wasm/expose": "nodeport",
+                "k3s-wasm/public-server": entry,
+                "k3s-wasm/allow-from": allow_from,
+            },
+        },
+        "spec": {
+            "replicas": replicas,
+            "selector": { "matchLabels": { "app.kubernetes.io/name": name } },
+            "template": {
+                "metadata": { "labels": labels },
+                "spec": {
+                    "runtimeClassName": runtime_class,
+                    "containers": [{
+                        "name": "reality-server",
+                        "image": image,
+                        "imagePullPolicy": "IfNotPresent",
+                        "envFrom": [{ "secretRef": { "name": secret_name } }],
+                        "ports": [{ "name": "reality", "containerPort": inner_port, "protocol": "TCP" }],
+                        // 探针是裸 TCP 连接：未通过 REALITY 认证的流量会被回落到 dest 站点，
+                        // 所以这个探测对外看起来就是一次普通 TLS 访问，不泄露服务端身份。
+                        "readinessProbe": {
+                            "tcpSocket": { "port": inner_port },
+                            "periodSeconds": 10, "failureThreshold": 6
+                        },
+                        "resources": {
+                            "requests": { "cpu": "10m", "memory": "32Mi" },
+                            "limits": { "memory": "192Mi" }
+                        }
+                    }]
+                }
+            }
+        }
+    });
+    if let Err(e) = k8s.post(&format!("/apis/apps/v1/namespaces/{namespace}/deployments"), &deployment) {
+        return from_err(e);
+    }
+
+    // 3) Service：NodePort 才是公网入口
+    let service = walljump_service(&name, &namespace, &labels, inner_port, node_port);
+    if let Err(e) = k8s.post(&format!("/api/v1/namespaces/{namespace}/services"), &service) {
+        return from_err(e);
+    }
+
+    // 4) NetworkPolicy：翻墙入口本来就要对公网开放，所以放行 allowFrom；
+    //    集群内 Pod 也放行（便于用集群内客户端自测这条入口）。
+    let netpol = json!({
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": { "name": name, "namespace": namespace, "labels": labels },
+        "spec": {
+            "podSelector": { "matchLabels": { "app.kubernetes.io/name": name } },
+            "policyTypes": ["Ingress"],
+            "ingress": [{
+                "from": [{ "podSelector": {} }, { "ipBlock": { "cidr": allow_from } }],
+                "ports": [{ "protocol": "TCP", "port": inner_port }]
+            }]
+        }
+    });
+    let netpol_warning = k8s
+        .post(
+            &format!("/apis/networking.k8s.io/v1/namespaces/{namespace}/networkpolicies"),
+            &netpol,
+        )
+        .err()
+        .map(|e| format!("NetworkPolicy 创建失败：{}", e.message()));
+
+    let link = build_vless_link_flow(&uuid, &entry, &public_key, &short_id, &sni, &name, None);
+    let client_config = build_client_config_flow(&uuid, &entry, &public_key, &short_id, &sni, false);
+    let mut out = json!({
+        "created": true,
+        "mode": "walljump",
+        "namespace": namespace,
+        "name": name,
+        "node": node,
+        "entry": entry,
+        "nodePort": node_port,
+        "publicHost": public_host,
+        "sni": sni,
+        "dest": dest,
+        "shortId": short_id,
+        "uuid": uuid,
+        "publicKey": public_key,
+        "vlessLink": link,
+        "clientConfig": client_config,
+        "impl": "xray-wasm（wasm32-wasip2，REALITY 服务端模式 XT_MODE=server）",
+        "direction": "REALITY 入站 → 直连出站",
+        "usage": format!("国内客户端导入上面的 vless 链接即可；入口就是 {entry}（节点 {node} 的公网地址）"),
+        "note": format!(
+            "翻墙入口已就绪：{entry}（REALITY 入 → 直连出，出网走节点 {node} 自己的网络）。\
+             ⚠️ 这条链接**故意不带 flow**：xray-wasm 服务端尚未实现 XTLS-Vision 流控，\
+             带非空 flow 的客户端会被明确拒绝。未认证的探测者会看到 {dest} 的真实证书（回落行为）。"
+        ),
+    });
+    if let Some(w) = netpol_warning {
+        out["warning"] = json!(w);
+    }
+    Response::ok(out)
+}
+
+/// 节点是否 Ready。
+fn node_ready(node: &Value) -> bool {
+    node["status"]["conditions"]
+        .as_array()
+        .map(|cs| {
+            cs.iter()
+                .any(|c| c["type"] == "Ready" && c["status"] == "True")
+        })
+        .unwrap_or(false)
+}
+
+/// 取节点的某种地址（InternalIP / ExternalIP / Hostname）。
+fn node_addr(node: &Value, kind: &str) -> Option<String> {
+    node["status"]["addresses"]
+        .as_array()
+        .and_then(|a| {
+            a.iter()
+                .find(|x| x["type"].as_str() == Some(kind))
+                .and_then(|x| x["address"].as_str())
+        })
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+}
+
+/// 翻墙入口的 Service（NodePort）。
+///
+/// ⚠️ Service 的 `spec.selector` 是**扁平的 label map**，不是 Deployment 那种
+/// `{matchLabels: {...}}`。写错的症状是创建时报：
+///   `Service in version "v1" cannot be handled as a Service:
+///    json: cannot unmarshal object into Go struct field ServiceSpec.spec.selector of type string`
+/// 单测把形状钉住 —— 这类"形状写错"的错误 mock 完全测不出来（mock 只回 200），
+/// 只有真集群的 API server 会拒绝。
+fn walljump_service(
+    name: &str,
+    namespace: &str,
+    labels: &Value,
+    port: u16,
+    node_port: u16,
+) -> Value {
+    json!({
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": { "name": name, "namespace": namespace, "labels": labels },
+        "spec": {
+            "type": "NodePort",
+            "selector": { "app.kubernetes.io/name": name },
+            "ports": [{
+                "name": "reality",
+                "port": port,
+                "targetPort": port,
+                "nodePort": node_port,
+                "protocol": "TCP"
+            }]
+        }
+    })
+}
+
+/// 翻墙模式要写进 Secret 的环境变量。
+///
+/// ⚠️ 键名必须与 xray-wasm CLI 的 `server --help` 里列出的**环境变量**完全一致
+/// （`XT_MODE=server` / `XT_PRIVATE_KEY` / `XT_SHORT_IDS` / `XT_SERVER_NAMES` /
+/// `XT_DEST` / `XT_USERS` / `XT_SERVER_LISTEN`）。单测把这份契约钉住：写错一个字母的
+/// 症状是容器起来后按客户端模式跑（或参数校验失败），而 args/pod spec 里看不出异常。
+fn walljump_env(
+    private_key: &str,
+    short_id: &str,
+    sni: &str,
+    dest: &str,
+    uuid: &str,
+    port: u16,
+) -> Value {
+    json!({
+        // 同一个 wasm 模块以服务端形态启动（免参数，凭据只从环境变量进来）
+        "XT_MODE": "server",
+        "XT_SERVER_LISTEN": format!("0.0.0.0:{port}"),
+        "XT_PRIVATE_KEY": private_key,
+        "XT_SHORT_IDS": short_id,
+        "XT_SERVER_NAMES": sni,
+        "XT_DEST": dest,
+        "XT_USERS": uuid,
+    })
+}
+
+/// 由 base64url 私钥推出对应公钥 —— 复用别人给的私钥时必须重算，
+/// 否则客户端拿到的 pbk 与服务端私钥不匹配，症状是握手「回落」到真实站点。
+fn pubkey_from_private_key(private_b64: &str) -> Option<String> {
+    use base64::Engine as _;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(private_b64.trim())
+        .ok()?;
+    if raw.len() != 32 {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&raw);
+    let secret = x25519_dalek::StaticSecret::from(bytes);
+    Some(b64url(x25519_dalek::PublicKey::from(&secret).as_bytes()))
 }
 
 /// GET /api/xray/tunnels/:ns/:name/vless
@@ -1456,21 +1960,67 @@ pub fn xray_vless(_req: &Request, ns: &str, name: &str) -> Response {
             .unwrap_or_default()
     };
 
-    let uuid = dec("XT_UUID");
-    let server = dec("XT_SERVER");
-    let pbk = dec("XT_PBK");
-    let sid = dec("XT_SID");
-    let sni = dec("XT_SNI");
     let socks_user = dec("XT_SOCKS_USER");
-    if uuid.is_empty() || server.is_empty() || pbk.is_empty() {
-        return Response::fail(422, "Secret 里缺少 XT_UUID / XT_SERVER / XT_PBK，无法重建链接");
-    }
 
-    // 分享链接要给**外部**用：优先取部署上的 k3s-wasm/public-server（例如经 Traefik 的 443）；
+    // 分享链接要给**外部**用：优先取部署上的 k3s-wasm/public-server（隧道可能经 Traefik/NodePort）；
     // 而隧道客户端自己连的是 XT_SERVER（可能是集群内 ClusterIP，对外无意义）。
+    // 这些都要先拿到 Deployment —— 顺便用它上面的 k3s-wasm/mode 注解判断模式。
     let dep = k8s
         .get(&format!("/apis/apps/v1/namespaces/{ns}/deployments/{name}"))
         .ok();
+    let ann = dep
+        .as_ref()
+        .map(|d| d["metadata"]["annotations"].clone())
+        .unwrap_or_else(|| json!({}));
+    let mode = ann["k3s-wasm/mode"].as_str().unwrap_or("tunnel").to_string();
+    let is_walljump = mode == "walljump";
+
+    // 两种模式的 Secret **形状不同**，不能共用一套字段读取：
+    //   隧道（客户端）  ：XT_SERVER / XT_UUID / XT_PBK / XT_SID / XT_SNI / XT_SOCKS_*
+    //   翻墙（服务端）  ：XT_PRIVATE_KEY / XT_USERS / XT_SHORT_IDS / XT_SERVER_NAMES / XT_DEST
+    // 所以翻墙模式下：uuid 取 XT_USERS 的第一个，公钥**从私钥推导**（不重复存一份公钥），
+    // SNI/shortId/入口一律以 Deployment 上的注解为准（那才是分享给外部用的值）。
+    let (uuid, server, pbk, sid, sni) = if is_walljump {
+        let uuid = dec("XT_USERS")
+            .split(',')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let pbk = pubkey_from_private_key(&dec("XT_PRIVATE_KEY")).unwrap_or_default();
+        let server = ann["k3s-wasm/public-server"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .or_else(|| ann["k3s-wasm/server"].as_str())
+            .unwrap_or("")
+            .to_string();
+        (
+            uuid,
+            server,
+            pbk,
+            ann["k3s-wasm/short-id"].as_str().unwrap_or("").to_string(),
+            ann["k3s-wasm/sni"].as_str().unwrap_or("").to_string(),
+        )
+    } else {
+        (
+            dec("XT_UUID"),
+            dec("XT_SERVER"),
+            dec("XT_PBK"),
+            dec("XT_SID"),
+            dec("XT_SNI"),
+        )
+    };
+    if uuid.is_empty() || server.is_empty() || pbk.is_empty() {
+        return Response::fail(
+            422,
+            if is_walljump {
+                "翻墙模式下 Secret 里缺少 XT_USERS / XT_PRIVATE_KEY（无法推导公钥与用户名）"
+            } else {
+                "Secret 里缺少 XT_UUID / XT_SERVER / XT_PBK，无法重建链接"
+            },
+        );
+    }
+
     let public_server = dep
         .as_ref()
         .and_then(|d| d["metadata"]["annotations"]["k3s-wasm/public-server"].as_str())
@@ -1478,10 +2028,15 @@ pub fn xray_vless(_req: &Request, ns: &str, name: &str) -> Response {
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| server.clone());
 
-    let link = build_vless_link(&uuid, &public_server, &pbk, &sid, &sni, name);
+    // 翻墙模式**不带 flow**：xray-wasm 服务端未实现 Vision 流控，带了会被明确拒绝
+    let link = build_vless_link_flow(&uuid, &public_server, &pbk, &sid, &sni, name, if is_walljump { None } else { Some("xtls-rprx-vision") });
+    let client_config = build_client_config_flow(&uuid, &public_server, &pbk, &sid, &sni, !is_walljump);
     Response::ok(json!({
         "name": name,
         "namespace": ns,
+        "mode": if is_walljump { "walljump" } else { "tunnel" },
+        "impl": if is_walljump { "xray-wasm（REALITY 服务端）" } else { "xray-wasm（REALITY 客户端）" },
+        "clientConfig": client_config,
         "vlessLink": link,
         // 说明两件事：链接里的地址（对外）与客户端实际连的地址（可能不同）
         "server": public_server,
@@ -1489,10 +2044,21 @@ pub fn xray_vless(_req: &Request, ns: &str, name: &str) -> Response {
         "sni": sni,
         "shortId": sid,
         "publicKey": pbk,
-        // SOCKS5 用户名可以给（用于拼连接命令）；密码**不回显**
-        "socksUser": socks_user,
-        "socksEndpoint": format!("{name}.{ns}.svc.cluster.local:1080"),
-        "note": "链接含客户端凭据（UUID/pbk），请勿公开；REALITY 私钥在服务端，这里没有也不需要。",
+        // SOCKS5 用户名可以给（用于拼连接命令）；密码**不回显**。
+        // 翻墙模式没有 SOCKS5 入口（入口是 REALITY），这两个字段留空，前端据此隐藏相关按钮。
+        "socksUser": if is_walljump { String::new() } else { socks_user },
+        "socksEndpoint": if is_walljump {
+            String::new()
+        } else {
+            format!("{name}.{ns}.svc.cluster.local:1080")
+        },
+        "note": if is_walljump {
+            "翻墙入口：把 vlessLink 导入客户端即可（**链接不带 flow** —— xray-wasm 服务端尚未实现 \
+             XTLS-Vision 流控，带非空 flow 会被拒绝）。链接含客户端凭据（UUID/pbk），请勿公开；\
+             REALITY 私钥在服务端，这里没有也不需要。"
+        } else {
+            "链接含客户端凭据（UUID/pbk），请勿公开；REALITY 私钥在服务端，这里没有也不需要。"
+        },
     }))
 }
 
@@ -1622,9 +2188,30 @@ fn split_host_port(s: &str, default_port: u16) -> (String, u16) {
 }
 
 fn build_vless_link(uuid: &str, server: &str, pbk: &str, sid: &str, sni: &str, name: &str) -> String {
+    // 隧道模式：上游是 stock Xray，支持 Vision，所以带 flow
+    build_vless_link_flow(uuid, server, pbk, sid, sni, name, Some("xtls-rprx-vision"))
+}
+
+/// 带/不带 `flow` 的 vless 链接。
+///
+/// ⚠️ `flow` 不是可选的"优化"，而是**互操作开关**：
+///   * 隧道模式（我们当客户端、上游是 stock Xray）→ `flow=xtls-rprx-vision` 可用；
+///   * 翻墙模式（xray-wasm 当**服务端**）→ **必须不带 flow**：xray-wasm 服务端
+///     尚未实现 XTLS-Vision 流控，带非空 flow 的请求会被明确拒绝
+///     （实测报 `Not supported: 服务端尚未实现 Vision 流控…`），不是静默降级。
+fn build_vless_link_flow(
+    uuid: &str,
+    server: &str,
+    pbk: &str,
+    sid: &str,
+    sni: &str,
+    name: &str,
+    flow: Option<&str>,
+) -> String {
     // 参数顺序尽量贴近官方客户端导出的样子；spx 固定 /（REALITY 的回落到路径）
+    let flow_part = flow.map(|f| format!("&flow={f}")).unwrap_or_default();
     format!(
-        "vless://{uuid}@{server}?encryption=none&type=tcp&security=reality&pbk={pbk}&fp=chrome&sni={sni}&sid={sid}&spx=%2F&flow=xtls-rprx-vision#{name}"
+        "vless://{uuid}@{server}?encryption=none&type=tcp&security=reality&pbk={pbk}&fp=chrome&sni={sni}&sid={sid}&spx=%2F{flow_part}#{name}"
     )
 }
 
@@ -1656,7 +2243,24 @@ fn build_server_config(uuid: &str, private_key: &str, sid: &str, sni: &str, port
 }
 
 fn build_client_config(uuid: &str, server: &str, pbk: &str, sid: &str, sni: &str) -> Value {
+    // 隧道模式：上游 stock Xray，带 Vision
+    build_client_config_flow(uuid, server, pbk, sid, sni, true)
+}
+
+/// `with_flow=false` 用于**翻墙**模式（xray-wasm 服务端不实现 Vision 流控）。
+fn build_client_config_flow(
+    uuid: &str,
+    server: &str,
+    pbk: &str,
+    sid: &str,
+    sni: &str,
+    with_flow: bool,
+) -> Value {
     let (host, port) = split_host_port(server, 443);
+    let mut user = json!({ "id": uuid, "encryption": "none" });
+    if with_flow {
+        user["flow"] = json!("xtls-rprx-vision");
+    }
     json!({
         "log": { "loglevel": "warning" },
         "inbounds": [{
@@ -1667,7 +2271,7 @@ fn build_client_config(uuid: &str, server: &str, pbk: &str, sid: &str, sni: &str
             "protocol": "vless",
             "settings": { "vnext": [{
                 "address": host, "port": port,
-                "users": [{ "id": uuid, "encryption": "none", "flow": "xtls-rprx-vision" }]
+                "users": [user]
             }] },
             "streamSettings": {
                 "network": "tcp",
@@ -1815,6 +2419,118 @@ mod tests {
         assert!(!is_dns1123_label("trailing-"));
         assert!(!is_dns1123_label(""));
         assert!(!is_dns1123_label(&"x".repeat(64)));
+    }
+
+    #[test]
+    fn walljump_link_has_no_flow_but_tunnel_does() {
+        // 翻墙模式的链接**不能**带 flow：xray-wasm 服务端未实现 XTLS-Vision 流控，
+        // 带非空 flow 会被明确拒绝（实测报 "Not supported: 服务端尚未实现 Vision 流控"）。
+        let wj = build_vless_link_flow("u1", "1.2.3.4:30543", "pbk", "sid", "www.cloudflare.com", "home", None);
+        assert!(!wj.contains("flow="), "翻墙链接不该含 flow：{wj}");
+        assert!(wj.contains("security=reality") && wj.contains("pbk=pbk") && wj.contains("sid=sid"));
+        assert!(wj.starts_with("vless://u1@1.2.3.4:30543?"));
+        assert!(wj.ends_with("#home"));
+
+        let tn = build_vless_link("u1", "1.2.3.4:443", "pbk", "sid", "www.cloudflare.com", "tokyo");
+        assert!(tn.contains("flow=xtls-rprx-vision"));
+    }
+
+    #[test]
+    fn walljump_client_config_omits_flow_field() {
+        let wj = build_client_config_flow("u1", "1.2.3.4:30543", "pbk", "sid", "sni.example", false);
+        let user = &wj["outbounds"][0]["settings"]["vnext"][0]["users"][0];
+        assert_eq!(user["id"], "u1");
+        assert!(user.get("flow").is_none(), "翻墙客户端配置里不该有 flow 字段：{user}");
+        let tn = build_client_config("u1", "1.2.3.4:443", "pbk", "sid", "sni.example");
+        assert_eq!(
+            tn["outbounds"][0]["settings"]["vnext"][0]["users"][0]["flow"],
+            "xtls-rprx-vision"
+        );
+    }
+
+    #[test]
+    fn walljump_service_has_flat_selector() {
+        // 真集群实测过：Service 的 selector 写成 Deployment 的 {matchLabels:{...}} 会被
+        // API server 拒（400 cannot unmarshal object into ... spec.selector of type string）。
+        let labels = json!({"app.kubernetes.io/name": "home"});
+        let svc = walljump_service("home", "k3s-wasm", &labels, 8443, 30543);
+        let sel = &svc["spec"]["selector"];
+        assert!(sel.is_object(), "selector 必须是对象");
+        assert_eq!(sel["app.kubernetes.io/name"], "home");
+        assert!(
+            sel.get("matchLabels").is_none(),
+            "Service 的 selector 不能嵌套 matchLabels：{sel}"
+        );
+        assert_eq!(svc["spec"]["type"], "NodePort");
+        let p = &svc["spec"]["ports"][0];
+        assert_eq!(p["port"], 8443);
+        assert_eq!(p["targetPort"], 8443);
+        assert_eq!(p["nodePort"], 30543);
+    }
+
+    #[test]
+    fn walljump_env_matches_cli_contract() {
+        let env = walljump_env("PRIV", "aabbccdd", "www.cloudflare.com", "www.cloudflare.com:443", "uuid-1", 8443);
+        // 键名取自 xray-wasm `server --help` 的环境变量清单；改错一个字母会被当成客户端启动
+        assert_eq!(env["XT_MODE"], "server");
+        assert_eq!(env["XT_PRIVATE_KEY"], "PRIV");
+        assert_eq!(env["XT_SHORT_IDS"], "aabbccdd");
+        assert_eq!(env["XT_SERVER_NAMES"], "www.cloudflare.com");
+        assert_eq!(env["XT_DEST"], "www.cloudflare.com:443");
+        assert_eq!(env["XT_USERS"], "uuid-1");
+        assert_eq!(env["XT_SERVER_LISTEN"], "0.0.0.0:8443");
+    }
+
+    #[test]
+    fn pubkey_from_private_matches_official_xray_vector() {
+        // 向量来自官方 `xray x25519 -i`（32 字节全零私钥 clamp 后）。
+        // 复用别人给的私钥时必须重算公钥：不匹配的症状是服务端认证失败、回落真实站点。
+        // 刻意不用 reality_keypair()：它走 wasi:random，原生单测里拿不到随机源。
+        let zero_priv = "A".repeat(43);
+        assert_eq!(
+            pubkey_from_private_key(&zero_priv).as_deref(),
+            Some("L-V9o0fNYkMVKNqsX7spBzD_9oSvxM_C7ZCZX1jLO3Q")
+        );
+        assert!(pubkey_from_private_key("not base64!!").is_none());
+        assert!(pubkey_from_private_key(&b64url(&[0u8; 16])).is_none(), "长度不对必须拒绝");
+    }
+
+    #[test]
+    fn shape_reports_walljump_as_wasm_ingress() {
+        // 翻墙模式：入站 REALITY、出站直连；实现仍是 wasm（xray-wasm 服务端模式）
+        let dep = json!({
+            "metadata": {
+                "name": "home", "namespace": "k3s-wasm",
+                "annotations": {
+                    "k3s-wasm/mode": "walljump",
+                    "k3s-wasm/server": "2.29.44.63:30543",
+                    "k3s-wasm/public-server": "2.29.44.63:30543",
+                    "k3s-wasm/sni": "www.cloudflare.com",
+                    "k3s-wasm/short-id": "aabbccdd",
+                    "k3s-wasm/listen": "0.0.0.0:8443",
+                    "k3s-wasm/node": "n1",
+                    "k3s-wasm/allow-from": "0.0.0.0/0"
+                }
+            },
+            "spec": {
+                "replicas": 1,
+                "template": {"spec": {
+                    "runtimeClassName": "wasmtime-wasip2",
+                    "containers": [{"image": "docker.io/k3s-wasm/xray-wasm-cli:v0.4.0"}]
+                }}
+            },
+            "status": {"readyReplicas": 1}
+        });
+        let svc = json!({"spec": {"type": "NodePort", "ports": [{"port": 8443, "nodePort": 30543}]}});
+        let out = xray_shape(&dep, Some(&svc));
+        assert_eq!(out["mode"], "walljump");
+        assert_eq!(out["direction"], "ingress");
+        assert_eq!(out["isWasm"], true);
+        assert_eq!(out["runtimeClass"], "wasmtime-wasip2");
+        assert_eq!(out["ingress"]["endpoint"], "2.29.44.63:30543");
+        assert_eq!(out["usage"]["inbound"], true);
+        assert_eq!(out["usage"]["outbound"], false);
+        assert_eq!(out["node"], "n1");
     }
 
     #[test]
