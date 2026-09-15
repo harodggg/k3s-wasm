@@ -182,6 +182,16 @@ export interface TunnelView {
   hasUuid: boolean;
 }
 
+/** 这条隧道的「入站面」：谁能连进它的监听端口（由 Service 类型决定，后端读实际的 Service） */
+export interface TunnelExposure {
+  serviceType: string | null;
+  nodePort: number | null;
+  port: number;
+  reach: string;
+  /** true=公网可达，false=仅集群内，null=取不到 Service */
+  public: boolean | null;
+}
+
 export interface XrayTunnel {
   kind: string;
   name: string;
@@ -194,6 +204,11 @@ export interface XrayTunnel {
   tunnel: TunnelView;
   managedBy: string;
   isWasm: boolean;
+  /** 目前恒为 "egress"：xray-wasm 是客户端，只能把集群内流量送出去 */
+  direction: string;
+  directionLabel: string;
+  egress: { via: string | null; protocol: string; note: string };
+  ingress: { endpoint: string; exposure: TunnelExposure };
 }
 
 /** 自动生成的一整套隧道参数（含只出现一次的私钥） */

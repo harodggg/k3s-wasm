@@ -225,13 +225,22 @@ export function xrayView(): ViewInstance {
         el(
           'dl',
           { class: 'kv' },
+          // 方向：这条面板目前只能创建「出站」隧道（客户端把集群内流量送出去）；
+          // 「入站」在这里的含义是「谁能连进它的监听端口」，由 Service 类型决定。
+          kv('方向', t.directionLabel ?? '出站'),
+          kv('出站链路', `${t.egress?.via ?? t.tunnel.server ?? '-'} · ${t.egress?.protocol ?? 'SOCKS5 → VLESS+REALITY'}`),
+          kv('入站入口', t.ingress?.endpoint ?? `${t.name}.${t.namespace}.svc.cluster.local:${port}`),
+          kv(
+            '入站暴露',
+            `${t.ingress?.exposure?.reach ?? '未知'}${
+              t.ingress?.exposure?.serviceType ? ` · Service 类型 ${t.ingress.exposure.serviceType}` : ''
+            }`,
+          ),
           kv('命名空间', t.namespace),
-          kv('服务端', t.tunnel.server ?? '-'),
           kv('SNI', t.tunnel.sni ?? '-'),
           kv('shortId', t.tunnel.shortId ?? '-'),
           kv('UUID', t.tunnel.hasUuid ? '已配置（不回显）' : '未配置'),
           kv('监听', t.tunnel.listen ?? '-'),
-          kv('SOCKS5 入口', `${t.name}.${t.namespace}.svc.cluster.local:${port}`),
           kv('副本', t.replicas === 0 ? '0（已停）' : `${t.readyReplicas}/${t.replicas}`),
           kv('运行时', t.runtimeClass),
           kv('镜像', t.image ?? '-'),
@@ -266,7 +275,17 @@ export function xrayView(): ViewInstance {
           ),
         ),
       ),
-      badge('wasmtime', 'ok'),
+      el(
+        'span',
+        { class: 'badges' },
+        badge('出站', 'ok'),
+        t.ingress?.exposure?.public === true
+          ? badge('公网可达', 'err')
+          : t.ingress?.exposure?.public === false
+            ? badge('仅集群内', 'muted')
+            : badge('暴露未知', 'warn'),
+        badge(t.runtimeClass, 'info'),
+      ),
     );
   }
 

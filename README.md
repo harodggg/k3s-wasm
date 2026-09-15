@@ -104,7 +104,8 @@ make e2e                          # 31 项端到端断言（真实 wasm 宿主�
 - **WASM 运行时**：RuntimeClass ↔ 可调度节点数 ↔ 是否错配
 - **工作负载**：Deployment 列表，可按命名空间过滤、只看 wasm
 - **Spin 应用**：创建 / 扩缩 / 删除 SpinApp（含 executor 选择，因为 runtimeClassName 来自 executor）
-- **Xray 隧道**：把 `xray-wasm` 作为 wasm 工作负载下发（ConfigMap + Deployment + Service）—— **见下方说明**
+- **Xray 隧道**：把 `xray-wasm` 作为 wasm 工作负载下发（Secret + Deployment + ClusterIP Service + NetworkPolicy）；
+  列表区分**出站**（集群内 → 经 REALITY 出网）与**入站暴露面**（ClusterIP=仅集群内 / NodePort=公网可达，会标红）
 - **日志 / 事件**：Pod 日志跟随刷新、命名空间事件（排障用）
 
 ### Xray 面板（已可用于生产形态的部署）

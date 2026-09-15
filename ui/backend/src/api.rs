@@ -723,11 +723,56 @@ fn xray_deployments(k8s: &K8s, ns: &str) -> Result<Vec<Value>, ApiError> {
 /// kube-api-proxy 被同命名空间其它 Pod 摸到，也读不到集群里的任何密钥。
 /// 代价是隧道配置（含 UUID）以明文存在 ConfigMap 里 —— 不接受的话见
 /// docs/03-xray-wasm.md 的「改用 Secret」。
-fn xray_shape(dep: &Value) -> Value {
+/// 这条隧道的「入站面」：谁能连进它的监听端口。
+///
+/// 说明：xray-wasm 是**客户端**，架构上只能做出站（把集群内的流量送出去）。
+/// 但「入站」这半件事是真实且可核对的 —— 就是这个 Service 的暴露方式：
+///   ClusterIP   → 仅集群内可达
+///   NodePort    → 公网可达（nodePort 写在下面，UI 会当风险提示）
+///   LoadBalancer→ 公网可达
+fn shape_exposure(svc: Option<&Value>, fallback_port: u16) -> Value {
+    let Some(svc) = svc else {
+        return json!({
+            "serviceType": null,
+            "nodePort": null,
+            "port": fallback_port,
+            "reach": "未找到 Service（入口可能被手工删过）",
+            "public": null,
+        });
+    };
+    let ty = svc["spec"]["type"].as_str().unwrap_or("ClusterIP");
+    let port = svc["spec"]["ports"]
+        .as_array()
+        .and_then(|p| p.first())
+        .and_then(|p| p["port"].as_u64())
+        .map(|v| v as u16)
+        .unwrap_or(fallback_port);
+    let node_port = svc["spec"]["ports"]
+        .as_array()
+        .and_then(|p| p.first())
+        .and_then(|p| p["nodePort"].as_u64());
+    let (reach, public) = match ty {
+        "ClusterIP" => ("仅集群内可达".to_string(), false),
+        "NodePort" => (
+            match node_port {
+                Some(np) => format!("公网可达（NodePort {np}）"),
+                None => "公网可达（NodePort）".to_string(),
+            },
+            true,
+        ),
+        other => (format!("公网可达（{other}）"), true),
+    };
+    json!({ "serviceType": ty, "nodePort": node_port, "port": port, "reach": reach, "public": public })
+}
+
+fn xray_shape(dep: &Value, svc: Option<&Value>) -> Value {
     let spec = &dep["spec"];
     let status = &dep["status"];
     let ann = &dep["metadata"]["annotations"];
     let listen = ann["k3s-wasm/listen"].as_str().unwrap_or("0.0.0.0:1080");
+    let port: u16 = listen.rsplit_once(':').and_then(|(_, p)| p.parse().ok()).unwrap_or(1080);
+    let ns = dep["metadata"]["namespace"].as_str().unwrap_or_default();
+    let name = dep["metadata"]["name"].as_str().unwrap_or_default();
 
     json!({
         "kind": "xray-tunnel",
@@ -749,6 +794,20 @@ fn xray_shape(dep: &Value) -> Value {
         },
         "managedBy": MANAGED_BY,
         "isWasm": true,
+        // ── 方向 ───────────────────────────────────────────────────
+        // 出站：流量从集群内 → 经 REALITY 服务端 → 目标（本面板创建的就是这个方向）
+        // 入站：这里指「谁能连进它的监听端口」，由 Service 类型决定
+        "direction": "egress",
+        "directionLabel": "出站（集群内 → 经 REALITY 出网）",
+        "egress": {
+            "via": ann["k3s-wasm/server"],
+            "protocol": "SOCKS5 → VLESS+XTLS-Vision+REALITY",
+            "note": "客户端主动连它才生效；不接管集群内其它流量",
+        },
+        "ingress": {
+            "endpoint": format!("{name}.{ns}.svc.cluster.local:{port}"),
+            "exposure": shape_exposure(svc, port),
+        },
     })
 }
 
@@ -763,7 +822,29 @@ pub fn xray_list(req: &Request) -> Response {
         Err(e) => return from_err(e),
     };
 
-    let items: Vec<Value> = deps.iter().map(xray_shape).collect();
+    // 入站面要看 Service 的真实类型（ClusterIP / NodePort / LoadBalancer），
+    // 不能靠猜：暴露与否决定了这条隧道是否等于把出口代理公开出去。
+    let sel = encode_query(&xray_selector());
+    let svc_path = if ns.is_empty() || ns == "_all" {
+        format!("/api/v1/services?labelSelector={sel}")
+    } else {
+        format!("/api/v1/namespaces/{ns}/services?labelSelector={sel}")
+    };
+    let services = k8s
+        .get(&svc_path)
+        .map(|v| v["items"].as_array().cloned().unwrap_or_default())
+        .unwrap_or_default();
+
+    let items: Vec<Value> = deps
+        .iter()
+        .map(|d| {
+            let name = d["metadata"]["name"].as_str().unwrap_or_default();
+            let svc = services
+                .iter()
+                .find(|s| s["metadata"]["name"].as_str() == Some(name));
+            xray_shape(d, svc)
+        })
+        .collect();
 
     Response::ok(json!({
         "items": items,

@@ -81,7 +81,28 @@ kubectl -n kube-system get pods | grep svclb            # 应为空
 > （`flow=xtls-rprx-vision#Xray`）。是新增的「生成→解析」往返单测把它抓出来的 —— 之前那条
 > 只断言了 uuid/pbk/sid/sni，恰好漏过 flow。
 
-## 4. 已知限制（部署前必读）
+## 4. 列表里的「出站 / 入站」
+
+隧道列表现在把两个方向分开显示，因为它们的含义完全不同：
+
+| 方向 | 含义 | 谁决定 |
+|---|---|---|
+| **出站** | 流量从**集群内**出发 → 经 REALITY 服务端 → 目标。这是 `xray-wasm` 唯一能做的方向（它是**客户端**） | 架构决定，恒为出站 |
+| **入站** | 这里是「**谁能连进**这条隧道的监听端口」 | 后端**读实际的 Service 类型**，不猜：`ClusterIP` → 仅集群内；`NodePort`/`LoadBalancer` → 列表标红「公网可达」 |
+
+后端的 `ingress.exposure` 是**从集群真实读取**的，实测对照：
+
+```
+ClusterIP  → direction=egress public=false  reach=仅集群内可达
+NodePort   → direction=egress public=true   reach=公网可达（NodePort 31080）   ← 会自动标红
+```
+
+> ⚠️ **真正的"入站隧道"（外部 → 集群内服务）这个面板做不到**，这是架构边界不是配置问题：
+> `xray-wasm` 是出站客户端（SOCKS5 服务端 + REALITY 客户端），它无法接受来自公网的连接再转发进集群。
+> 要做反向方向，需要服务端侧配合（例如服务端再跑一个反向代理/relay，或换成 frp/rathole 这类内网穿透），
+> 那是另一套软件。所以列表里的「入站」只描述**暴露面**，不表示存在入站转发能力。
+
+## 5. 已知限制（部署前必读）
 
 - **一次只处理一条连接**：wasip2 没有线程，当前是顺序 accept。长连接客户端（HTTP/2、keep-alive）
   会独占一个 Pod。缓解：`replicas ≥ 2`。
@@ -92,7 +113,7 @@ kubectl -n kube-system get pods | grep svclb            # 应为空
 - **`XT_CLIENT_VER` 要对齐**服务端 `minClientVer/maxClientVer`（默认 `26.3.27`），
   设错的症状是「证书不是 Ed25519」。
 
-## 5. 连接方式
+## 6. 连接方式
 
 部署后（假设 Service 名 `xray-wasm`、命名空间 `xray`、端口 1080）：
 
@@ -113,7 +134,7 @@ ssh -N -L 1080:$(kubectl -n xray get svc xray-wasm -o jsonpath='{.spec.clusterIP
 > 为什么不做成 NodePort/LoadBalancer：那等于把你的出口代理公开给全网。
 > 需要长期外部访问的话，用 WireGuard/Tailscale 之类把节点网络接通，再走 ② 或 ③。
 
-## 6. 换到自己的服务端
+## 7. 换到自己的服务端
 
 ```bash
 kubectl -n xray create secret generic xray-wasm \
