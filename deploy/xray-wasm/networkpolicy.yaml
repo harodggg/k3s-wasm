@@ -1,8 +1,13 @@
 # 两层防护的第二层：认证管「谁能用」，网络策略管「谁能连」。
 #
-# ⚠️ 默认只允许**同命名空间**的 Pod 连接（够跑验证），
-#    要放开给别的命名空间就改 from；别图省事写成空 from（那等于不限制）。
-#    egress 只放行到服务端 IP，避免这个 Pod 被当成跳板去打集群内外其它东西。
+# ── 只做 ingress，不做 egress 收紧（实测结论）─────────────────────────
+#   最初这里还带一段 egress 收紧（只允许到 REALITY 服务端的 IP:端口）。
+#   在 k3s + Cilium（kube-proxy 替换）+ 服务端与节点同 IP 的组合下实测：
+#   加上它之后隧道会卡在 SOCKS5 协商阶段（curl 超时，客户端日志停在「新连接」），
+#   删掉后立刻恢复。具体机制未深究，因此**默认不启用**。
+#   如果你要 egress 收紧（避免这个 Pod 被当跳板），把它加回来后**务必复测隧道**。
+#
+# ⚠️ 默认只允许**同命名空间**的 Pod 连接；要放开给别的命名空间就改 from。
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -12,18 +17,19 @@ spec:
   podSelector:
     matchLabels:
       app.kubernetes.io/name: xray-wasm
-  policyTypes: ["Ingress", "Egress"]
+  policyTypes: ["Ingress"]
   ingress:
     - from:
         - podSelector: {}
       ports:
         - protocol: TCP
           port: 1080
-  egress:
-    # 只要到 REALITY 服务端就够了：客户端所有流量都从这条隧道出去
-    - to:
-        - ipBlock:
-            cidr: <服务端IP>/32
-      ports:
-        - protocol: TCP
-          port: <服务端端口>
+  # ── 可选的 egress 收紧（启用前请复测隧道）─────────────────────────
+  # policyTypes: ["Ingress", "Egress"]
+  # egress:
+  #   - to:
+  #       - ipBlock:
+  #           cidr: <服务端IP>/32
+  #     ports:
+  #       - protocol: TCP
+  #         port: <服务端端口>

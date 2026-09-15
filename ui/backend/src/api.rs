@@ -716,39 +716,29 @@ fn xray_deployments(k8s: &K8s, ns: &str) -> Result<Vec<Value>, ApiError> {
 /// kube-api-proxy 被同命名空间其它 Pod 摸到，也读不到集群里的任何密钥。
 /// 代价是隧道配置（含 UUID）以明文存在 ConfigMap 里 —— 不接受的话见
 /// docs/03-xray-wasm.md 的「改用 Secret」。
-fn tunnel_configmap_name(name: &str) -> String {
-    format!("{name}-config")
-}
-
-fn xray_shape(dep: &Value, config: Option<&Value>) -> Value {
+fn xray_shape(dep: &Value) -> Value {
     let spec = &dep["spec"];
     let status = &dep["status"];
-    let tunnel = config
-        .map(|c| {
-            c["data"]["tunnel.json"]
-                .as_str()
-                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .unwrap_or(Value::Null)
-        })
-        .unwrap_or(Value::Null);
+    let ann = &dep["metadata"]["annotations"];
+    let listen = ann["k3s-wasm/listen"].as_str().unwrap_or("0.0.0.0:1080");
 
     json!({
         "kind": "xray-tunnel",
         "name": dep["metadata"]["name"],
         "namespace": dep["metadata"]["namespace"],
-        "replicas": spec["replicas"].as_i64().unwrap_or(1),
+        "replicas": spec["replicas"].as_i64().unwrap_or(2),
         "readyReplicas": status["readyReplicas"].as_i64().unwrap_or(0),
         "image": spec["template"]["spec"]["containers"].as_array()
             .and_then(|c| c.first()).map(|c| c["image"].clone()).unwrap_or(Value::Null),
         "runtimeClass": spec["template"]["spec"]["runtimeClassName"],
         "createdAt": dep["metadata"]["creationTimestamp"],
-        // 只回显展示字段；uuid 只报「有没有」，避免把凭据喷到浏览器里
+        // 只回显非敏感字段；凭据在 Secret 里，控制台不读也不回显
         "tunnel": {
-            "server": tunnel["server"],
-            "sni": tunnel["sni"],
-            "shortId": tunnel["shortId"],
-            "listen": tunnel["listen"],
-            "hasUuid": tunnel["uuid"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+            "server": ann["k3s-wasm/server"],
+            "sni": ann["k3s-wasm/sni"],
+            "shortId": ann["k3s-wasm/short-id"],
+            "listen": listen,
+            "hasUuid": true,
         },
         "managedBy": MANAGED_BY,
         "isWasm": true,
@@ -766,28 +756,7 @@ pub fn xray_list(req: &Request) -> Response {
         Err(e) => return from_err(e),
     };
 
-    let sel = encode_query(&xray_selector());
-    let cfg_path = if ns.is_empty() || ns == "_all" {
-        format!("/api/v1/configmaps?labelSelector={sel}")
-    } else {
-        format!("/api/v1/namespaces/{ns}/configmaps?labelSelector={sel}")
-    };
-    let configs = k8s
-        .get(&cfg_path)
-        .map(|v| v["items"].as_array().cloned().unwrap_or_default())
-        .unwrap_or_default();
-
-    let items: Vec<Value> = deps
-        .iter()
-        .map(|d| {
-            let name = d["metadata"]["name"].as_str().unwrap_or_default();
-            let cfg_name = tunnel_configmap_name(name);
-            let cfg_item = configs
-                .iter()
-                .find(|c| c["metadata"]["name"] == cfg_name.as_str());
-            xray_shape(d, cfg_item)
-        })
-        .collect();
+    let items: Vec<Value> = deps.iter().map(xray_shape).collect();
 
     Response::ok(json!({
         "items": items,
@@ -958,7 +927,19 @@ pub fn xray_create(req: &Request) -> Response {
     let deployment = json!({
         "apiVersion": "apps/v1",
         "kind": "Deployment",
-        "metadata": { "name": name, "namespace": namespace, "labels": labels },
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "labels": labels,
+            // 非敏感的展示字段放 annotation：凭据只在 Secret 里，
+            // 这样列表页不需要 secrets 的读权限就能显示「连的是哪个服务端」。
+            "annotations": {
+                "k3s-wasm/server": server,
+                "k3s-wasm/sni": sni,
+                "k3s-wasm/short-id": short_id,
+                "k3s-wasm/listen": listen,
+            },
+        },
         "spec": {
             "replicas": replicas,
             "selector": { "matchLabels": { "app.kubernetes.io/name": name } },
@@ -1016,29 +997,29 @@ pub fn xray_create(req: &Request) -> Response {
         return from_err(e);
     }
 
-    // 4) NetworkPolicy：认证管「谁能用」，它管「谁能连」
-    let server_host = server.rsplit_once(':').map(|(h, _)| h).unwrap_or(&server).to_string();
-    let server_port = server.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok()).unwrap_or(443);
+    // 4) NetworkPolicy：认证管「谁能用」，它管「谁能连」。
+    //
+    // ⚠️ 只做 ingress 限制，**默认不做 egress 收紧** —— 这是实测结论，不是偷懒：
+    //   把 egress 收紧成「只允许到服务端 IP:端口」之后，隧道会卡在 SOCKS5 协商阶段
+    //   （curl 超时、客户端日志停在「新连接」没有下文）；删掉该策略后立刻恢复正常。
+    //   在 Cilium + kube-proxy 替换 + 服务端就在同一节点 IP 上这个组合下复现稳定。
+    //   想要 egress 收紧的话：自行加上并**务必复测隧道**（deploy/xray-wasm/networkpolicy.yaml
+    //   里留了注释掉的模板）。
     let netpol = json!({
         "apiVersion": "networking.k8s.io/v1",
         "kind": "NetworkPolicy",
         "metadata": { "name": name, "namespace": namespace, "labels": labels },
         "spec": {
             "podSelector": { "matchLabels": { "app.kubernetes.io/name": name } },
-            "policyTypes": ["Ingress", "Egress"],
+            "policyTypes": ["Ingress"],
             "ingress": [{
                 "from": [{ "podSelector": {} }],
                 "ports": [{ "protocol": "TCP", "port": port }]
-            }],
-            "egress": [
-                // 只需要到 REALITY 服务端：所有客户端流量都从这条隧道出去
-                { "to": [{ "ipBlock": { "cidr": format!("{server_host}/32") } }],
-                  "ports": [{ "protocol": "TCP", "port": server_port }] }
-            ]
+            }]
         }
     });
     if let Err(e) = k8s.post(&format!("/apis/networking.k8s.io/v1/namespaces/{namespace}/networkpolicies"), &netpol) {
-        // NetworkPolicy 失败不算致命（Cilium/某些 CNI 行为差异），但要如实告诉用户
+        // NetworkPolicy 失败不算致命，但要如实告诉用户
         return Response::ok(json!({
             "created": true, "namespace": namespace, "name": name,
             "socksEndpoint": format!("{name}.{namespace}.svc.cluster.local:{port}"),
@@ -1086,6 +1067,8 @@ pub fn xray_delete(_req: &Request, ns: &str, name: &str) -> Response {
         return Response::fail(400, "命名空间或名称不合法");
     }
 
+    // 面板创建过的对象都要清掉：Deployment / Service / NetworkPolicy / Secret
+    // （删不存在的对象是幂等的，403 之类的真实错误则如实上抛）
     let mut deleted = Vec::new();
     for (path, what) in [
         (
@@ -1094,17 +1077,21 @@ pub fn xray_delete(_req: &Request, ns: &str, name: &str) -> Response {
         ),
         (format!("/api/v1/namespaces/{ns}/services/{name}"), "service"),
         (
-            format!(
-                "/api/v1/namespaces/{ns}/configmaps/{}",
-                tunnel_configmap_name(name)
-            ),
-            "configmap",
+            format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/{name}"),
+            "networkpolicy",
+        ),
+        (
+            format!("/api/v1/namespaces/{ns}/secrets/{name}"),
+            "secret",
         ),
     ] {
         match k8s.delete(&path) {
             Ok(_) => deleted.push(what),
-            // 已经不存在就跳过：删除是幂等的
             Err(e) if e.is_not_found() => {}
+            // 没有 secrets 权限时不该整体失败：其余对象已经删掉了，把情况说清楚
+            Err(e) if e.is_forbidden() && what == "secret" => {
+                deleted.push("secret(跳过：无权限)");
+            }
             Err(e) => return from_err(e),
         }
     }
@@ -1221,11 +1208,6 @@ mod tests {
         assert_eq!(v["shortId"], "9f1c2a3b");
         assert_eq!(v["sni"], "www.amazon.com");
         assert!(parse_vless_link("http://x").is_none());
-    }
-
-    #[test]
-    fn tunnel_configmap_name_is_derived() {
-        assert_eq!(tunnel_configmap_name("tokyo"), "tokyo-config");
     }
 
     #[test]
