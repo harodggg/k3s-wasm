@@ -32,12 +32,27 @@ runwasi 的 **wasmtime shim** 上 —— 容器里不需要 wasmtime，运行时
 
 清单见 `deploy/xray-wasm/`；控制台的「Xray 隧道」面板会生成同一套对象（含 Secret 与 NetworkPolicy）。
 
-### 端口选择：别用 80/443
+### 端口选择：非 443 容易被拦，但 443 要先从 Traefik 手里拿回来
 
 k3s 自带的 Traefik 以 `LoadBalancer` Service 暴露，其 servicelb 声明的 **hostPort 80/443 由 Cilium 在 BPF 里实现 —— `ss` 看不到监听者**。
-本仓库实测：把 REALITY 服务端放在 443 上「绑定成功」，但客户端拿到的却是 Traefik 的默认证书
-（`CN=TRAEFIK DEFAULT CERT`）。所以测试服务端用 **8443**。
-要在同一台机器上用 443，先让 Traefik 不再占用它（改 hostNetwork 并显式绑 80/443，或换 LB 方案）。
+所以会出现这种诡异现象：把 REALITY 服务端绑到 443 上「成功」、`ss` 也显示它在听，
+但客户端拿到的却是 Traefik 的默认证书（`CN=TRAEFIK DEFAULT CERT`）——
+BPF 的 hostPort DNAT 抢在本地 socket 之前。
+
+而 8443 这类非 443 端口虽然能用，在真实网络里更容易被针对（上游 README 也提醒过）。
+**推荐做法：把 443 真正腾出来**（本仓库实测有效）：
+
+```bash
+# Traefik 的 LB 我们其实用不到（UI 都走 NodePort），改成 ClusterIP 后 svclb Pod 消失，
+# BPF hostPort 规则随之移除，443 才真正空闲
+kubectl -n kube-system patch svc traefik --type merge -p '{"spec":{"type":"ClusterIP"}}'
+kubectl -n kube-system get pods | grep svclb            # 应为空
+# 然后让 REALITY 服务端绑 443，并从公网侧验证：
+#   openssl s_client -connect <ip>:443 -servername <伪装域名> | grep subject=
+# 未认证客户端应看到**伪装站点的真实证书**（REALITY 回落），而不是 Traefik 的默认证书
+```
+
+想保留 Traefik 的 80/443 LB 又想自己用 443，就得换一台机器/换一个 IP 了。
 
 ## 3. 已知限制（部署前必读）
 
