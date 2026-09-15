@@ -75,8 +75,17 @@ else
     ok "mock 就绪"
 fi
 
+# 免密登录的会话密钥：**必须给**，否则门禁对所有 /api 返回 503（失败关闭）。
+# http://127.0.0.1 是浏览器认可的「可信来源」，所以本机也能真正跑通 Touch ID 绑定/登录。
+# 两个值都随机生成；注册码会打印出来，首次打开页面绑定时填它。
+export K3S_WASM_SESSION_SECRET="${K3S_WASM_SESSION_SECRET:-$(python3 -c 'import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("="))')}"
+export K3S_WASM_REGISTRATION_CODE="${K3S_WASM_REGISTRATION_CODE:-$(python3 -c 'import os;print(os.urandom(8).hex())')}"
+export K3S_WASM_RP_ID="${K3S_WASM_RP_ID:-127.0.0.1}"
+export K3S_WASM_ORIGIN="${K3S_WASM_ORIGIN:-http://127.0.0.1:${PORT}}"
+
 log "wasmtime serve $WASM"
 info "组件 >  http://127.0.0.1:${PORT}/"
+info "首次绑定用的一次性注册码：${K3S_WASM_REGISTRATION_CODE}"
 info "API  >  http://127.0.0.1:${PORT}/api/summary"
 info "代理 >  ${K8S_PROXY_URL}"
 cat >&2 <<'EOF'

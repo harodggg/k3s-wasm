@@ -16,8 +16,14 @@ namespace: k3s-wasm
 resources:
   - ../../base
   - ui-deployment.yaml
-  # 浏览器直连入口（NodePort 30081）。不需要的话删掉这一行即可。
-  - ui-nodeport.yaml
+  # ⚠️ 刻意**不**再暴露 NodePort：控制台的对外入口只有 base/ui-ingress.yaml 里的
+  # HTTPS（Let's Encrypt）。原因有两个，都是硬性的：
+  #   1. WebAuthn（Touch ID / passkey）只在安全上下文里可用，明文 HTTP 上浏览器
+  #      根本不给 navigator.credentials；
+  #   2. 这个组件带着 kube-api-proxy 的权限，明文入口等于把「建删工作负载、读 Secret」
+  #      的能力连同会话 cookie 一起放到网上。
+  # 已有集群升级时记得把旧的 NodePort Service 删掉：
+  #   kubectl -n k3s-wasm delete svc k3s-wasm-ui-nodeport --ignore-not-found
 
 images:
   # 用完全限定名：kubelet 会把短名规范化成 docker.io/...，
@@ -25,4 +31,4 @@ images:
   # CRI 会因为名字对不上而尝试真拉取，报 pull access denied。
   - name: k3s-wasm/k3s-wasm-ui
     newName: docker.io/k3s-wasm/k3s-wasm-ui
-    newTag: v0.2.0
+    newTag: v0.3.0

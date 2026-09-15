@@ -108,6 +108,16 @@ make e2e                          # 31 项端到端断言（真实 wasm 宿主�
   列表区分**出站**（集群内 → 经 REALITY 出网）与**入站暴露面**（ClusterIP=仅集群内 / NodePort=公网可达，会标红）
 - **日志 / 事件**：Pod 日志跟随刷新、命名空间事件（排障用）
 
+### 登录：免密 Touch ID / passkey（WebAuthn）
+
+控制台**没有口令**，用 WebAuthn 免密登录（Mac 上就是 Touch ID）：首次用一次性注册码
+绑定，之后点一下按指纹即进。对外入口**只有 HTTPS**（Traefik + Let's Encrypt 自动签发），
+明文 NodePort 已刻意去掉 —— 一是 WebAuthn 只在安全上下文可用，二是这个组件手里是
+kube-api-proxy 的权限。
+
+没有配置会话密钥时，`/api/*` 一律 **503 并说明要配什么**（失败关闭），而不是放行。
+完整的部署步骤、验签清单与排障表见 **`docs/06-auth.md`**。
+
 ### Xray 面板（已可用于生产形态的部署）
 
 `xray-wasm` 的 `xt-wasm-cli.wasm`（298 KB）可以直接跑在 k3s 的 wasmtime shim 上 ——

@@ -31,8 +31,10 @@
         <header class="topbar">
           <h1 id="view-title">概览</h1>
           <div class="topbar-right">
+            <span id="auth-indicator" class="badge badge-ok hidden">Touch ID 已登录</span>
             <span id="last-updated" class="muted"></span>
             <button id="refresh" class="btn" title="立即刷新">刷新</button>
+            <button id="logout" class="btn" title="退出登录（由后端清除会话 cookie）">退出登录</button>
           </div>
         </header>
         <div id="banner" class="banner hidden"></div>
@@ -40,6 +42,8 @@
       </main>
       <div id="toast" class="toast hidden"></div>
     </div>
+    <!-- 未登录时只显示这一块；#app（导航 + 数据区）整体隐藏 -->
+    <div id="auth" class="auth hidden"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

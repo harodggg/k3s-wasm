@@ -1,0 +1,81 @@
+# 控制台的对外入口：**只用 HTTPS**。
+#
+# 为什么必须 TLS：控制台用 WebAuthn（Touch ID / passkey）做免密登录，而 WebAuthn
+# 只在安全上下文里可用 —— 明文 HTTP 上浏览器连 `navigator.credentials` 都不会给。
+# 另外控制台手里是 kube-api-proxy 的写权限（能建删工作负载、读 Secret），
+# 明文暴露等于把这些能力连同会话 cookie 一起放到网上。
+#
+# 证书由 Traefik 的 `le` resolver 通过 Let's Encrypt HTTP-01 自动申请：
+# 前置是 deploy/optional/traefik-acme.yaml（acme.json 落 PVC），以及 80 端口能被
+# Let's Encrypt 访问到（HTTP-01 走 80；本仓库的 Traefik Service 是 LoadBalancer）。
+#
+# ⚠️ host 是站点相关的：换成你自己的域名时，同时要改：
+#   * 两处 rules[].host / tls[].hosts
+#   * 控制台的 K3S_WASM_RP_ID / K3S_WASM_ORIGIN（否则 WebAuthn 的 rpIdHash / origin 校验不过）
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+  namespace: k3s-wasm
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+---
+# ① 明文入口：只做 301 到 https
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: k3s-wasm-ui
+  namespace: k3s-wasm
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+    traefik.ingress.kubernetes.io/router.middlewares: k3s-wasm-redirect-https@kubernetescrd
+    # ⚠️ 这条 priority 是给 ACME 让路的，不是优化：Traefik 内部挑战路由
+    # （PathPrefix("/.well-known/acme-challenge/")）的优先级来自规则长度（~40），
+    # 我们把它压到 1，于是挑战路径只由内部路由应答，其余路径才 301 到 https。
+    # 不这么做的话 LE 的 HTTP-01 会被 301 到 https、拿到控制台 HTML，报
+    # 403 "Invalid response from https://…/acme-challenge/…"。
+    # 另外：Ingress 上**不支持** router.rule 注解（实测 "field not found, node: rule"），
+    # 别想着用 !PathPrefix 排除——那会把整条路由的注解解析搞挂。
+    traefik.ingress.kubernetes.io/router.priority: "1"
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: console.2.29.44.63.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: k3s-wasm-ui
+                port:
+                  number: 80
+---
+# ② HTTPS 入口：证书交给 le resolver 自动签发/续期
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: k3s-wasm-ui-tls
+  namespace: k3s-wasm
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls.certresolver: le
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - console.2.29.44.63.nip.io
+  rules:
+    - host: console.2.29.44.63.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: k3s-wasm-ui
+                port:
+                  number: 80

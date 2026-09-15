@@ -30,7 +30,7 @@ spec:
       serviceAccountName: k3s-wasm-ui
       containers:
         - name: ui
-          image: docker.io/k3s-wasm/k3s-wasm-ui:v0.2.0
+          image: docker.io/k3s-wasm/k3s-wasm-ui:v0.3.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -42,6 +42,34 @@ spec:
             - name: K8S_PROXY_URL
               value: http://10.43.0.53:8001
             # 该 IP 与 kube-api-proxy Service 的 spec.clusterIP 必须一致。
+            #
+            # ── 免密登录（WebAuthn / Touch ID）─────────────────────────
+            # 会话 cookie 的签名密钥。**没有它控制台会拒绝服务（503）而不是放行** ——
+            # 这个组件手里是 kube-api-proxy 的权限，配置不全时放行等于把集群交出去。
+            # 生成：openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
+            - name: K3S_WASM_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: k3s-wasm-ui-auth-env
+                  key: sessionSecret
+            # 首次绑定 Touch ID 用的一次性注册码；绑定成功后即失效。
+            - name: K3S_WASM_REGISTRATION_CODE
+              valueFrom:
+                secretKeyRef:
+                  name: k3s-wasm-ui-auth-env
+                  key: registrationCode
+                  optional: true
+            # WebAuthn 的 RP ID 与 origin：必须与浏览器地址栏里的一致，否则
+            # rpIdHash / origin 校验不过（现象是「登录时找不到凭据」或 401）。
+            # 不填则从请求的 Host 头推导（见 auth.rs 的 effective_rp）。
+            - name: K3S_WASM_RP_ID
+              value: console.2.29.44.63.nip.io
+            - name: K3S_WASM_ORIGIN
+              value: https://console.2.29.44.63.nip.io
+            # 公钥凭据存放的 Secret 名（由控制台自己写入；与上面的 env Secret 分开，
+            # 免得凭据 JSON 被当成环境变量注入）。
+            - name: K3S_WASM_AUTH_SECRET
+              value: k3s-wasm-ui-auth
           readinessProbe:
             httpGet:
               path: /api/health

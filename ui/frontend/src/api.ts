@@ -370,6 +370,103 @@ export interface CreatedTunnel {
   note: string;
 }
 
+// ── 认证（WebAuthn / Touch ID） ──────────────────────────────────────
+//
+// 后端只认 WebAuthn（ui/backend/src/auth.rs）。二进制字段一律是
+// **无 padding 的 base64url 字符串**，到了视图里才转成 ArrayBuffer。
+// 这里直接沿用 DOM 的字面量联合类型：它们就是 WebAuthn 线上的取值，
+// 于是视图构造 PublicKeyCredential*Options 时不需要额外断言。
+
+/** GET /api/auth/status */
+export interface AuthStatus {
+  mode: string;
+  configured: boolean;
+  configuredError: string | null;
+  rpId: string;
+  origin: string;
+  secretName: string;
+  registrationCodeSet: boolean;
+  registered: boolean;
+  authenticated: boolean;
+  sessionTtlSeconds: number;
+}
+
+/** allowCredentials / excludeCredentials 的元素；id 是 base64url */
+export interface AuthCredentialDescriptor {
+  type: 'public-key';
+  id: string;
+  transports?: AuthenticatorTransport[];
+}
+
+/** POST /api/auth/register/begin 的响应 = navigator.credentials.create 的参数 */
+export interface RegisterBeginOptions {
+  /** base64url */
+  challenge: string;
+  rp: { id: string; name: string };
+  user: { id: string; name: string; displayName: string };
+  pubKeyCredParams: { type: 'public-key'; alg: number }[];
+  timeout: number;
+  attestation: AttestationConveyancePreference;
+  authenticatorSelection: {
+    authenticatorAttachment?: AuthenticatorAttachment;
+    residentKey?: ResidentKeyRequirement;
+    userVerification?: UserVerificationRequirement;
+  };
+  excludeCredentials: AuthCredentialDescriptor[];
+}
+
+/** POST /api/auth/login/begin 的响应 = navigator.credentials.get 的参数 */
+export interface LoginBeginOptions {
+  /** base64url */
+  challenge: string;
+  rpId: string;
+  timeout: number;
+  userVerification: UserVerificationRequirement;
+  allowCredentials: AuthCredentialDescriptor[];
+}
+
+export interface RegisterBeginBody {
+  code: string;
+}
+
+/** POST /api/auth/register/finish 的请求体（全部 base64url） */
+export interface RegisterFinishBody {
+  id: string;
+  rawId: string;
+  type: 'public-key';
+  response: { clientDataJSON: string; attestationObject: string };
+}
+
+export interface RegisterFinishResult {
+  registered: boolean;
+  authenticated: boolean;
+  credentialId: string;
+  note: string;
+}
+
+/** POST /api/auth/login/finish 的请求体（全部 base64url） */
+export interface LoginFinishBody {
+  id: string;
+  rawId: string;
+  type: 'public-key';
+  response: {
+    clientDataJSON: string;
+    authenticatorData: string;
+    signature: string;
+    userHandle?: string | null;
+  };
+}
+
+export interface LoginFinishResult {
+  authenticated: boolean;
+  signCount?: number;
+  warning?: string;
+}
+
+export interface LogoutResult {
+  authenticated: boolean;
+}
+
 // ── 接口 ────────────────────────────────────────────────────────────
 
 const q = (params: Record<string, string | undefined>): string => {
@@ -383,6 +480,18 @@ const q = (params: Record<string, string | undefined>): string => {
 
 export const api = {
   health: () => request<Health>('/api/health'),
+
+  // 免密登录。除 /api/health 与 /api/auth/* 外，未登录时所有接口都返回 401。
+  authStatus: () => request<AuthStatus>('/api/auth/status'),
+  authRegisterBegin: (code: string) =>
+    post<RegisterBeginOptions>('/api/auth/register/begin', { code } satisfies RegisterBeginBody),
+  authRegisterFinish: (body: RegisterFinishBody) =>
+    post<RegisterFinishResult>('/api/auth/register/finish', body),
+  authLoginBegin: () => post<LoginBeginOptions>('/api/auth/login/begin', {}),
+  authLoginFinish: (body: LoginFinishBody) =>
+    post<LoginFinishResult>('/api/auth/login/finish', body),
+  authLogout: () => post<LogoutResult>('/api/auth/logout', {}),
+
   summary: () => request<Summary>('/api/summary'),
   nodes: () => request<NodeInfo[]>('/api/nodes'),
   runtimes: () => request<RuntimeInfo[]>('/api/runtimes'),

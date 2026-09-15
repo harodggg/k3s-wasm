@@ -9,6 +9,8 @@ resources:
   - runtimeclass-wasmtime.yaml
   - kube-api-proxy.yaml
   - ui-service.yaml
+  # 控制台对外入口（HTTPS + Let's Encrypt；host 换成你自己的域名时见文件头注释）
+  - ui-ingress.yaml
 
 commonLabels:
   app.kubernetes.io/part-of: k3s-wasm

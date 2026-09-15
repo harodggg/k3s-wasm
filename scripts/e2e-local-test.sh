@@ -82,6 +82,25 @@ log "启动 wasm 宿主：${HOST_KIND}（端口 ${PORT}）"
 export K8S_PROXY_URL="http://127.0.0.1:${PROXY_PORT}"
 export DISABLE_WASMTIME_CACHE=1     # 否则 wasmtime 会去写 ~/Library/Caches 并失败
 export WASMTIME_CACHE_DIR="$REPO_DIR/.wasmtime-cache"
+
+# 免密登录：门禁默认开启（失败关闭），所以 e2e 必须给出会话密钥，并自己签一个合法的
+# 会话 cookie。格式与 ui/backend/src/auth.rs 一致：
+#   b64url(JSON) + "." + b64url(HMAC-SHA256(secret, b64url(JSON)))
+# 签名对不上只会得到「未登录」，看不出是格式问题 —— 所以这段刻意与实现一一对应。
+export K3S_WASM_SESSION_SECRET="$(python3 -c 'import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("="))')"
+export K3S_WASM_REGISTRATION_CODE="e2e-registration-code"
+export K3S_WASM_RP_ID="127.0.0.1"
+export K3S_WASM_ORIGIN="http://127.0.0.1:${PORT}"
+COOKIE="$(python3 - "$K3S_WASM_SESSION_SECRET" <<'PYCOOKIE'
+import base64, hashlib, hmac, json, sys, time
+secret_b64 = sys.argv[1]
+secret = base64.urlsafe_b64decode(secret_b64 + "=" * (-len(secret_b64) % 4))
+def b64(b): return base64.urlsafe_b64encode(b).decode().rstrip("=")
+payload = b64(json.dumps({"kind": "session", "sub": "owner", "exp": int(time.time()) + 600}).encode())
+sig = b64(hmac.new(secret, payload.encode(), hashlib.sha256).digest())
+print("k3s_wasm_session=" + payload + "." + sig)
+PYCOOKIE
+)"
 mkdir -p "$WASMTIME_CACHE_DIR" 2>/dev/null || true
 
 if [ "$HOST_KIND" = spin ]; then
@@ -89,6 +108,8 @@ if [ "$HOST_KIND" = spin ]; then
     # kill 它杀不到 spin，spin 会变孤儿占着端口，下一次测试就打到旧实例上。
     cd "$REPO_DIR/ui/backend"
     "$SPIN_BIN" up -e "K8S_PROXY_URL=$K8S_PROXY_URL" \
+        -e "K3S_WASM_SESSION_SECRET=$K3S_WASM_SESSION_SECRET" \
+        -e "K3S_WASM_REGISTRATION_CODE=$K3S_WASM_REGISTRATION_CODE" \
         --listen "127.0.0.1:${PORT}" >/tmp/k3s-wasm-e2e-host.log 2>&1 &
     HOST_PID=$!
     cd "$REPO_DIR"
@@ -111,7 +132,8 @@ ok "宿主就绪（${HOST_KIND}）"
 
 # ── 断言工具 ────────────────────────────────────────────────────────
 # get_json <路径> -> 打印 body
-get_json() { curl -sS -m 10 "$BASE$1"; }
+# 带会话 cookie：除 /api/health 与 /api/auth/* 外，所有 /api 都要求已登录
+get_json() { curl -sS -m 10 -H "Cookie: $COOKIE" "$BASE$1"; }
 jq_ok()    { jq -e "$2" >/dev/null 2>&1; }
 
 check_json() {
@@ -126,7 +148,7 @@ check_json() {
 
 check_post() {
     local desc="$1" path="$2" payload="$3" expr="$4"
-    local body; body="$(curl -sS -m 10 -X POST -H 'content-type: application/json' -d "$payload" "$BASE$path")"
+    local body; body="$(curl -sS -m 10 -X POST -H "Cookie: $COOKIE" -H 'content-type: application/json' -d "$payload" "$BASE$path")"
     if printf '%s' "$body" | jq_ok - "$expr"; then
         ok_case "$desc"
     else
@@ -136,7 +158,7 @@ check_post() {
 
 check_delete() {
     local desc="$1" path="$2" expr="$3"
-    local body; body="$(curl -sS -m 10 -X DELETE "$BASE$path")"
+    local body; body="$(curl -sS -m 10 -X DELETE -H "Cookie: $COOKIE" "$BASE$path")"
     if printf '%s' "$body" | jq_ok - "$expr"; then
         ok_case "$desc"
     else
@@ -148,6 +170,22 @@ echo
 log "① 自身状态与静态资源"
 check_json "health 报告 wasm32-wasip2 与 wasi:http 接口" /api/health '.data.target=="wasm32-wasip2" and (.data.interface|test("incoming-handler"))'
 check_json "health 的 proxyUrl 来自环境变量" /api/health '.data.proxyUrlSource=="env"'
+check_json "health 报告免密登录已配置（含 rpId/origin）" /api/health '.data.auth.mode=="webauthn-passkey" and .data.auth.configured==true'
+
+# ── 门禁：匿名 401 / 带会话 200 / 认证状态匿名可读 ──
+ANON_CODE="$(curl -sS -m 10 -o /dev/null -w '%{http_code}' "$BASE/api/nodes")"
+if [ "$ANON_CODE" = 401 ]; then
+    ok_case "匿名访问 /api/nodes → 401（门禁生效）"
+else
+    bad_case "匿名访问 /api/nodes 应为 401" "拿到 HTTP ${ANON_CODE}"
+fi
+check_json "带会话 cookie 访问 /api/nodes → 200" /api/nodes '.ok==true'
+AUTH_STATUS="$(curl -sS -m 10 "$BASE/api/auth/status")"
+if printf '%s' "$AUTH_STATUS" | jq_ok - '.data.configured==true and .data.authenticated==false and .data.registered==false'; then
+    ok_case "/api/auth/status 匿名可读：已配置/未登录/未绑定"
+else
+    bad_case "/api/auth/status 状态正确" "拿到：$(printf '%s' "$AUTH_STATUS" | head -c 200)"
+fi
 
 SPA="$(get_json /)"
 if printf '%s' "$SPA" | grep -q 'id="app"'; then
@@ -198,10 +236,10 @@ log "④ xray 隧道"
 check_json "隧道列表（mock 里有一条 tokyo）" "/api/xray/tunnels?namespace=k3s-wasm" '.data.items|length==1'
 check_json "隧道披露 SOCKS5 入口与运行时" "/api/xray/tunnels?namespace=k3s-wasm" '.data.shim.runtimeClass=="wasmtime-wasip2"'
 check_post "创建隧道（会下发 ConfigMap + Deployment + Service）" /api/xray/tunnels \
-    '{"name":"e2e-tokyo","namespace":"k3s-wasm","server":"203.0.113.9:443","uuid":"11111111-2222-3333-4444-555555555555","publicKey":"PUBKEY","shortId":"abcd1234","sni":"www.example.com","listen":"0.0.0.0:1080","replicas":1}' \
+    '{"name":"e2e-tokyo","namespace":"k3s-wasm","server":"203.0.113.9:443","uuid":"11111111-2222-3333-4444-555555555555","publicKey":"PUBKEY","shortId":"abcd1234","sni":"www.example.com","listen":"0.0.0.0:1080","replicas":1,"socksUser":"e2e","socksPass":"e2e-pass"}' \
     '.data.created==true and (.data.socksEndpoint|test(":1080"))'
 check_post "隧道扩容" /api/xray/tunnels/k3s-wasm/e2e-tokyo/scale '{"replicas":2}' '.ok==true'
-check_delete "删除隧道（Deployment+Service+ConfigMap）" /api/xray/tunnels/k3s-wasm/e2e-tokyo '.data.deleted|length==3'
+check_delete "删除隧道（Deployment+Service+NetworkPolicy）" /api/xray/tunnels/k3s-wasm/e2e-tokyo '.data.deleted|index("deployment")!=null and index("service")!=null'
 
 echo
 log "⑤ 参数校验与错误路径（这些才是线上最容易出问题的地方）"

@@ -136,7 +136,11 @@ pub fn read_request(req: &IncomingRequest) -> Request {
     let method = method_to_string(&req.method());
     let raw = req.path_with_query().unwrap_or_else(|| "/".to_string());
     let (path, query) = split_path_query(&raw);
-    let headers = read_fields(&req.headers());
+    // ⚠️ wasi:http 把 Host 放在 request 的 **authority** 上，不保证出现在 headers 里
+    //    （wasmtime 就不放）。而组件里好几处要靠 Host 推导 RP ID / origin / 对外地址，
+    //    少了它就会莫名其妙失败 —— 实测症状是 WebAuthn 注册接口 400「请求没有 Host 头」。
+    //    这里补一条 host 头，上层就不用关心它原本来自哪里。
+    let headers = ensure_host_header(read_fields(&req.headers()), req.authority());
     let body = match req.consume() {
         Ok(b) => drain_body(b),
         Err(()) => Vec::new(),
@@ -148,6 +152,23 @@ pub fn read_request(req: &IncomingRequest) -> Request {
         headers,
         body,
     }
+}
+
+/// 把 `authority`（wasi:http 里承载 Host 的地方）合并进头列表：
+/// 已经有 `host`（大小写不敏感）就不动，否则补一条。
+pub fn ensure_host_header(
+    mut headers: Vec<(String, String)>,
+    authority: Option<String>,
+) -> Vec<(String, String)> {
+    let has_host = headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("host"));
+    if !has_host {
+        if let Some(a) = authority.filter(|a| !a.trim().is_empty()) {
+            headers.push(("host".to_string(), a));
+        }
+    }
+    headers
 }
 
 /// 把响应写回宿主。顺序必须严格按 wasi-http 的要求：
@@ -273,6 +294,20 @@ mod tests {
         assert_eq!(req.query_param("node"), Some("k3s-node-1".into()));
         assert_eq!(req.query_param("empty"), Some("".into()));
         assert_eq!(req.query_param("missing"), None);
+    }
+
+    #[test]
+    fn host_header_is_synthesized_from_authority() {
+        // wasi:http 把 Host 放在 authority 上，headers 里可能没有 —— 实测 wasmtime 就是
+        // 这样，症状是 WebAuthn 注册接口回 400「请求没有 Host 头」。
+        let h = ensure_host_header(vec![], Some("console.example.test".into()));
+        assert_eq!(h, vec![("host".to_string(), "console.example.test".to_string())]);
+        // 已有 Host（大小写不敏感）就不要重复补
+        let h2 = ensure_host_header(vec![("Host".into(), "a.test".into())], Some("b.test".into()));
+        assert_eq!(h2, vec![("Host".to_string(), "a.test".to_string())]);
+        // 没有 authority 就保持原样
+        assert!(ensure_host_header(vec![], None).is_empty());
+        assert!(ensure_host_header(vec![], Some("   ".into())).is_empty());
     }
 
     #[test]

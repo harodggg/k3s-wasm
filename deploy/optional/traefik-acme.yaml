@@ -1,0 +1,63 @@
+# 给 k3s 自带的 Traefik 打开 Let's Encrypt（HTTP-01），并把 acme.json 放到 PVC 上。
+#
+# 为什么需要它：控制台的免密登录用 WebAuthn（Touch ID / passkey），而 WebAuthn
+# **只在安全上下文里可用** —— 明文 HTTP 的 NodePort 上浏览器会直接拒绝调用指纹。
+# 所以控制台必须走 https://<域名>，并且证书要被浏览器信任（自签不算）。
+#
+# 为什么挂 PVC：Traefik chart 默认把 /data 挂成 emptyDir，acme.json 会随 Pod 重启丢失，
+# 每次重启都重新签发 —— Let's Encrypt 对「同一组域名」有 5 张/周的重复签发上限，
+# 重启几次就可能把自己锁住。这里单独挂一个 /acme 目录（不覆盖 chart 的 /data，避免挂载冲突）。
+#
+# 用法（集群级改动，刻意不放进 kustomize overlay，避免 `kubectl apply -k` 顺手动 Traefik）：
+#   kubectl apply -f deploy/optional/traefik-acme.yaml
+#   kubectl -n kube-system rollout status deploy/traefik
+#
+# ⚠️ email 只是 ACME 账号的联络地址（Let's Encrypt 不做验证），换成你自己的更好。
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: traefik-acme
+  namespace: kube-system
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # k3s 自带 local-path；多节点时注意 Traefik 只会有其中一个节点上的那份数据
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 64Mi
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  failurePolicy: reinstall
+  valuesContent: |-
+    service:
+      type: LoadBalancer
+    additionalArguments:
+      - "--certificatesresolvers.le.acme.email=k3s-wasm@2.29.44.63.nip.io"
+      - "--certificatesresolvers.le.acme.storage=/acme/acme.json"
+      # 用 HTTP-01（走 80）。两个坑都在这里踩过，写清楚免得再犯：
+      # ① Traefik v3 没有 httpchallenge=true 这个布尔量了 —— 写了它 httpChallenge 段解析失败，
+      #    现象是日志里 "HTTP challenge is not enabled" 且 "Router uses a nonexistent
+      #    certificate resolver le"，只要 entrypoint 这一行即可。
+      # ② 挑战路径必须不被「301 跳 https」抢走：Traefik 内部 ACME 路由的优先级低于
+      #    Host+PathPrefix 的用户路由，于是 LE 拿到的是控制台 HTML（403 invalid response）。
+      #    解法在 deploy/base/ui-ingress.yaml：明文入口的 rule 里排除
+      #    /.well-known/acme-challenge/ 前缀。
+      - "--certificatesresolvers.le.acme.httpchallenge.entrypoint=web"
+    deployment:
+      additionalVolumes:
+        - name: acme
+          persistentVolumeClaim:
+            claimName: traefik-acme
+    # ⚠️ 注意层级：additionalVolumes 在 deployment 下，而 additionalVolumeMounts 是
+    # **顶层**键（chart 40.x 的 values.yaml：500 行 volumes、509 行 additionalVolumeMounts）。
+    # 挂在 deployment 下不会报错、只会被静默忽略 —— 症状是 acme.json 打不开
+    # ("open /acme/acme.json: no such file or directory")、resolver 被跳过。
+    additionalVolumeMounts:
+      - name: acme
+        mountPath: /acme

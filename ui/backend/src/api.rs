@@ -17,7 +17,7 @@ use crate::k8s::{encode_query, ApiError, K8s};
 /// 上游换版本时前端改一个字段即可，不必重新构建 wasm。
 pub const SPINAPP_DEFAULT_APIVERSION: &str = "core.spinkube.dev/v1alpha1";
 
-fn client() -> (Config, K8s) {
+pub(crate) fn client() -> (Config, K8s) {
     let cfg = Config::load();
     let k8s = K8s::new(&cfg.proxy_url);
     (cfg, k8s)
@@ -209,11 +209,15 @@ fn filter_items_by_ns(mut list: Value, ns: &str) -> Value {
 // 自身状态
 // ════════════════════════════════════════════════════════════════════
 
-pub fn health(_req: &Request) -> Response {
+pub fn health(req: &Request) -> Response {
     let (cfg, _k8s) = client();
+    // 认证配置也在这里暴露（不含任何秘密）：登录页/排障时一眼看出 RP ID 与
+    // 「会话密钥/注册码是否配好」，省得靠猜。
+    let auth_info = crate::auth::describe(req, &crate::auth::AuthConfig::load(&cfg.default_namespace));
     Response::ok(json!({
         "status": "ok",
         "component": "k3s-wasm-ui",
+        "auth": auth_info,
         // 版本号来自 Cargo.toml（编译期常量），前端把它显示在侧栏
         "version": env!("CARGO_PKG_VERSION"),
         "target": "wasm32-wasip2",

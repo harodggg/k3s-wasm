@@ -42,6 +42,18 @@
 | 页面横幅「自动刷新失败：Cannot convert undefined or null to object」 | 视图里对**后端返回的 map 字段**直接用了 `Object.entries`，而该字段是 `null`（例如 k3s 内置 RuntimeClass 的 `nodeSelector`）。自动刷新每 5 秒重放一次，于是横幅常驻 | 用 `dom.ts` 的 `pairsText()` 渲染后端来的 map；后端也保证这类字段发 `{}` 而不是 `null`。CI 里有 `check-no-raw-object-entries.mjs` 守卫防止复发 |
 | 前端白屏，页面显示「前端资源未构建」 | 构建 wasm 时 `ui/frontend/dist` 不存在（build.rs 写入了占位页） | `cd ui/frontend && npm ci && npm run build`，再重新 `cargo build --release --target wasm32-wasip2`；或用 `make ui` |
 | 前端 fetch 报 `Unexpected token '<'` | 请求打到了静态资源回退（返回 HTML） | 未知 `/api/*` 现在会返回 JSON 404；若仍出现，确认路径拼写与 `lib.rs` 路由表 |
+| WebAuthn 接口回 **400「请求没有 Host 头」**，但浏览器明明发了 Host | **wasi:http 把 Host 放在 request 的 `authority` 上，不保证出现在 `headers()` 里**（wasmtime 就不放）。凡是靠 Host 推 RP ID / origin / 对外地址的代码都会拿不到值 | `http_io::read_request` 现在用 `ensure_host_header()` 从 `authority` 补一条 `host` 头；另外 `effective_rp` 在 `K3S_WASM_RP_ID/K3S_WASM_ORIGIN` 都配好时不再依赖 Host |
+| `/api/*` 全返回 **503** 并提示 `K3S_WASM_SESSION_SECRET` | 免密登录开启后门禁是**失败关闭**：没有会话密钥就拒绝服务（而不是放行） | 建 `k3s-wasm-ui-auth-env` Secret 并挂进 Deployment，见 `docs/06-auth.md` §2 |
+| 点「用 Touch ID 登录」没反应 / `navigator.credentials` 是 undefined | 不是安全上下文：明文 HTTP、或 https 但证书不被信任 | 用 `https://<域名>` 打开；自签证书要导入系统钥匙串。控制台已不再暴露明文 NodePort |
+
+## C2. 证书签发（Traefik + Let's Encrypt）
+
+| 现象 | 原因 | 处置 |
+|---|---|---|
+| Traefik 日志 `"HTTP challenge is not enabled"` + `Router uses a nonexistent certificate resolver le` | 在 **Traefik v3** 写了 `--certificatesresolvers.le.acme.httpchallenge=true` 这个 **v2 时代的布尔量**，导致 httpChallenge 段落解析失败、resolver 被跳过 | 只留 `--certificatesresolvers.le.acme.httpchallenge.entrypoint=web`（存在即启用） |
+| `unable to get ACME account: open /acme/acme.json: no such file or directory` | chart values 的层级写错了：`additionalVolumes` 在 `deployment:` 下，但 **`additionalVolumeMounts` 是顶层键**；写错只被静默忽略（volume 建了、没挂） | 见 `deploy/optional/traefik-acme.yaml` 注释里的层级 |
+| LE 回 `403 ... Invalid response from https://<域名>/.well-known/acme-challenge/...`（返回的是控制台 HTML） | 控制台 HTTP 入口带「301 跳 https」，而 Traefik 内部 ACME 路由优先级低于 `Host+PathPrefix` 用户路由，挑战被跳转截胡 | 给明文入口那条 Ingress 加 `traefik.ingress.kubernetes.io/router.priority: "1"`，让内部挑战路由赢（见 `deploy/base/ui-ingress.yaml`）。注意 Ingress **不支持** `router.rule` 注解，别用 `!PathPrefix` 排除（会把整条注解解析搞挂） |
+| TLS-ALPN 挑战回 `remote error: tls: unrecognized name` | 该 Traefik 组合下 ALPN 挑战路径没接住 | 用 HTTP-01 + 上面的优先级方案；确认 80 端口能被外网访问到 |
 
 ## D. 本地端到端测试（`make e2e`）
 

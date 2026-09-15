@@ -1,6 +1,6 @@
 [package]
 name = "k3s-wasm-ui"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 description = "k3s WASM 控制台后端：编译为 wasm32-wasip2 的 wasi:http/proxy 组件"
@@ -31,6 +31,17 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 base64 = "0.22"
 # 把前端 dist 在编译期嵌进 wasm：运行时不需要文件系统能力。
 include_dir = "0.7"
+
+# ── 免密登录（WebAuthn / passkey）需要的密码学 ──
+# 全部是纯 Rust，能编到 wasm32-wasip2；随机数仍然只用宿主给的 wasi:random。
+#   p256  : 验 WebAuthn 断言的 ES256 签名（Touch ID 的凭据就是 P-256）
+#   sha2  : rpIdHash / clientDataJSON 摘要
+#   hmac  : 会话 cookie 与挑战 cookie 的签名（组件无状态，会话必须自带签名）
+#   ciborium : 解析 attestationObject 与 COSE 公钥（CBOR）
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic"] }
+sha2 = "0.10"
+hmac = "0.12"
+ciborium = "0.2"
 
 [profile.release]
 opt-level = "s"
