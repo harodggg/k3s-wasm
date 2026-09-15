@@ -137,10 +137,14 @@ NodePort   → direction=egress public=true   reach=公网可达（NodePort 3108
 
 ## 5. 已知限制（部署前必读）
 
-- **一次只处理一条连接**：wasip2 没有线程，当前是顺序 accept。长连接客户端（HTTP/2、keep-alive）
-  会独占一个 Pod。缓解：`replicas ≥ 2`。
-- **探针会占用一次连接机会**：`tcpSocket` 探针会真的建连接（客户端日志里能看到协商失败），
-  靠 `XT_HANDSHAKE_TIMEOUT` 丢弃。所以刻意**不配 livenessProbe**，readiness 也放得很宽。
+- **并发：v0.2 起已不再是"一次一条连接"**（这条早期结论已过时，此处修正）。
+  上游 v0.2 改为非阻塞并发（`MAX_CONCURRENT_CONNS = 64`），v0.3 进一步用 `wasi:io/poll`
+  的 pollable 就绪通知替代轮询 —— README 的 A/B 实测：v0.1 顺序 accept 时长连接会把新请求
+  卡到时超时（12s），v0.2+ 是 HTTP 200 / 1s；空闲 CPU 也从 ~0.78% 降到 ~0.05%。
+  所以 `replicas=2` 是"分摊"而不是"必须"，长连接**不会**独占代理。
+- **探针仍会真的建一条 TCP 连接**（客户端日志里能看到 SOCKS5 协商失败/early eof），
+  由 `XT_HANDSHAKE_TIMEOUT` 丢弃；但不再会卡住后续请求。清单保持"不配 livenessProbe、
+  readiness 放宽"的保守设置即可。
 - **不支持 UDP**：QUIC / HTTP3 不可用。
 - **TLS 指纹不是浏览器形状**：未实现 uTLS Chrome 伪装，抗主动探测弱于官方客户端。
 - **`XT_CLIENT_VER` 要对齐**服务端 `minClientVer/maxClientVer`（默认 `26.3.27`），
@@ -177,7 +181,28 @@ ssh -N -L 1080:$(kubectl -n xray get svc xray-wasm -o jsonpath='{.spec.clusterIP
 读 Secret 的权限是**命名空间级 Role**（`k3s-wasm-tunnel-secrets`，只 `get`），不是集群级
 `get secrets` —— 后者等于能读全集群密钥。在别的命名空间建隧道时，把这份 Role/RoleBinding 复制过去。
 
-## 8. 镜像现在是下拉可选
+## 8. ⚠️ 两种模式：翻墙 vs 隧道（实现边界，务必看清）
+
+| 模式 | 入站 | 出站 | 现状 |
+|---|---|---|---|
+| **翻墙** | **REALITY**（你在国内直接连节点公网 IP） | **直连 socket**（从该节点的网络出网） | ❗**wasm 侧做不到** —— 见下 |
+| **隧道** | **SOCKS5**（集群内客户端） | **REALITY**（连远端 REALITY 服务端） | ✅ 就是本仓库已实现并实测的 `xray-wasm` |
+
+为什么"翻墙"模式不能用 `xray-wasm` 实现：它是**客户端**（SOCKS5 服务端 + REALITY 客户端），
+`REALITY 入 → 直连出` 需要一个 **REALITY 服务端**（TLS 服务端 + X25519 证明 + VLESS/Vision 服务端），
+`xray-wasm` 里没有这个方向。官方 Xray 是 Go 写的，也编不到 wasip2
+（Go 只支持 `wasip1`，而 wasip1 在标准库层面就发不出站 TCP —— 这正是本项目当初选 wasip2 的原因）。
+所以"翻墙"模式只能是**非 wasm**的：
+
+* **当前节点上的做法**：官方 Xray 二进制以 systemd 常驻在节点上（`/opt/xray-test`），
+  443 由 Traefik 按 SNI 做 TLS 直通转给它 —— 这就是"REALITY 入 → 直连出"，实测可用
+  （外网 `SNI=www.cloudflare.com` → HTTP 200 + 真实 Cloudflare 证书）。
+* **要在集群里做成"一等公民"**：把官方 Xray 作为**普通容器 Deployment** 部署（不是 wasm 工作负载），
+  用 NodePort / Traefik 直通暴露到节点公网 IP，控制台负责生成配置与 `vless://` 链接。
+
+本仓库的控制台目前只把**隧道**做成了面板功能；"翻墙"是节点级实现，未进控制台。
+
+## 9. 镜像现在是下拉可选
 
 「Xray 隧道」与「Spin 应用」两个表单的**镜像**字段都改成了「下拉建议 + 可手输」（HTML `datalist`）。
 候选来自 `GET /api/images?wasmOnly=1|0`，即**集群里正在运行的 Pod 所用镜像**：
@@ -194,7 +219,7 @@ ssh -N -L 1080:$(kubectl -n xray get svc xray-wasm -o jsonpath='{.spec.clusterIP
 
 拉不到候选时不影响手输；`defaults` 里也放了两条常见镜像兜底。
 
-## 9. 镜像下拉：按版本 tag 选
+## 10. 镜像下拉：按版本 tag 选
 
 「Xray 隧道」表单的镜像字段是一个 `datalist`，候选按三个来源合并、**版本优先**：
 
@@ -214,7 +239,7 @@ ssh -N -L 1080:$(kubectl -n xray get svc xray-wasm -o jsonpath='{.spec.clusterIP
 另外注意：`ghcr.io/harodggg/xray-wasm:<tag>` 是**容器镜像**（里面自带 wasmtime），
 不能配 wasmtime shim 用；shim 需要的是纯 wasm 模块镜像（`docker.io/k3s-wasm/xray-wasm-cli:<tag>`）。
 
-## 10. 换到自己的服务端
+## 11. 换到自己的服务端
 
 ```bash
 kubectl -n xray create secret generic xray-wasm \
