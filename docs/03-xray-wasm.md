@@ -207,9 +207,9 @@ Secret、用 `envFrom` 注入，**args 里不放任何凭据**（`kubectl descri
 
 ### 8.2 三条实测约束（决定面板怎么生成链接）
 
-1. **翻墙链接不带 `flow`**：xray-wasm 服务端**尚未实现** XTLS-Vision 流控，带非空 `flow`
-   的客户端会被**明确拒绝**（服务端日志：`Not supported: 服务端尚未实现 Vision 流控（客户端请求了
-   flow=xtls-rprx-vision）`），不是静默降级。面板据此生成无 flow 的链接与客户端配置。
+1. **翻墙链接带 `flow=xtls-rprx-vision`**：xray-wasm **v0.6.0 起服务端实现了 Vision 流控**（实测
+   stock 客户端带 flow、wasm 客户端默认带 flow 都能通），面板因此恢复带 flow 的链接 —— 这能抗
+   TLS-in-TLS 指纹。只有入口跑 **≤v0.5.x** 旧镜像时才需要把 flow 置空（那些版本会明确拒绝非空 flow）。
 2. **入口用 NodePort，不用 hostPort**：本集群命名空间带 PodSecurity `baseline` 强制，
    `hostPort` 会被准入直接拒掉（实测 `violates PodSecurity "baseline:latest": hostPort`）。
 3. **调度需要 wasm 节点**：翻墙模式跑的是 wasm 组件，而 `wasmtime-wasip2` 这个 RuntimeClass

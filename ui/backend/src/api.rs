@@ -1141,7 +1141,7 @@ pub fn xray_list(req: &Request) -> Response {
                 "entry": "NodePort（节点公网 IP:端口）",
                 "who": "你自己：在国内直连这个公网入口，出口走该节点的网络（socket 直连，无第二跳）",
                 "nodeRequirement": "需要装了 wasm 运行时（wasm.sh/wasmtime=true）且建议有公网 IP 的节点",
-                "flowNote": "链接必须不带 flow（服务端未实现 XTLS-Vision 流控）",
+                "flowNote": "v0.6.0 起服务端实现 Vision，链接带 flow（抗 TLS-in-TLS）；入口若跑 ≤v0.5.x 旧镜像则需空 flow",
             },
             {
                 "id": "tunnel",
@@ -1151,7 +1151,7 @@ pub fn xray_list(req: &Request) -> Response {
                 "entry": "ClusterIP / NodePort（socket / SOCKS5 代理端口）",
                 "who": "集群内的 Pod（或外部客户端）：从 socket（SOCKS5）进来，经远端 reality 出网",
                 "nodeRequirement": "任意带 wasm 运行时的节点",
-                "flowNote": "上游是 stock Xray 时可用 flow=xtls-rprx-vision；上游若是 xray-wasm 服务端则必须留空",
+                "flowNote": "上游 stock Xray 与 xray-wasm ≥v0.6.0 都支持 flow=xtls-rprx-vision；仅 ≤v0.5.x 的服务端要求留空",
             },
         ],
     }))
@@ -1662,7 +1662,7 @@ fn xray_create_walljump(req: &Request, body: &Value, cfg: &Config, k8s: &K8s) ->
         .as_str()
         .filter(|s| !s.is_empty())
         // v0.4.0 起同一个 wasm 模块同时支持客户端与服务端；v0.5.0 起客户端可 --no-flow
-        .unwrap_or("docker.io/k3s-wasm/xray-wasm-cli:v0.5.0")
+        .unwrap_or("docker.io/k3s-wasm/xray-wasm-cli:v0.6.0")
         .to_string();
     let runtime_class = body["runtimeClassName"]
         .as_str()
@@ -1794,8 +1794,8 @@ fn xray_create_walljump(req: &Request, body: &Value, cfg: &Config, k8s: &K8s) ->
         .err()
         .map(|e| format!("NetworkPolicy 创建失败：{}", e.message()));
 
-    let link = build_vless_link_flow(&uuid, &entry, &public_key, &short_id, &sni, &name, None);
-    let client_config = build_client_config_flow(&uuid, &entry, &public_key, &short_id, &sni, false);
+    let link = build_vless_link_flow(&uuid, &entry, &public_key, &short_id, &sni, &name, Some("xtls-rprx-vision"));
+    let client_config = build_client_config_flow(&uuid, &entry, &public_key, &short_id, &sni, true);
     let mut out = json!({
         "created": true,
         "mode": "walljump",
@@ -1817,8 +1817,8 @@ fn xray_create_walljump(req: &Request, body: &Value, cfg: &Config, k8s: &K8s) ->
         "usage": format!("国内客户端导入上面的 vless 链接即可；入口就是 {entry}（节点 {node} 的公网地址）"),
         "note": format!(
             "翻墙入口已就绪：{entry}（reality 入 → socket 出，出网走节点 {node} 自己的网络）。\
-             ⚠️ 这条链接**故意不带 flow**：xray-wasm 服务端尚未实现 XTLS-Vision 流控，\
-             带非空 flow 的客户端会被明确拒绝。未认证的探测者会看到 {dest} 的真实证书（回落行为）。"
+             链接**带 flow=xtls-rprx-vision**：xray-wasm v0.6.0 起服务端实现了 Vision 流控，\
+             这能抗 TLS-in-TLS 指纹；若入口跑的是 ≤v0.5.x 的旧镜像，则需把 flow 置空（否则会被拒）。未认证的探测者会看到 {dest} 的真实证书（回落行为）。"
         ),
     });
     if let Some(w) = netpol_warning {
@@ -2029,8 +2029,8 @@ pub fn xray_vless(_req: &Request, ns: &str, name: &str) -> Response {
         .unwrap_or_else(|| server.clone());
 
     // 翻墙模式**不带 flow**：xray-wasm 服务端未实现 Vision 流控，带了会被明确拒绝
-    let link = build_vless_link_flow(&uuid, &public_server, &pbk, &sid, &sni, name, if is_walljump { None } else { Some("xtls-rprx-vision") });
-    let client_config = build_client_config_flow(&uuid, &public_server, &pbk, &sid, &sni, !is_walljump);
+    let link = build_vless_link_flow(&uuid, &public_server, &pbk, &sid, &sni, name, Some("xtls-rprx-vision"));
+    let client_config = build_client_config_flow(&uuid, &public_server, &pbk, &sid, &sni, true);
     Response::ok(json!({
         "name": name,
         "namespace": ns,
@@ -2516,7 +2516,7 @@ mod tests {
                 "replicas": 1,
                 "template": {"spec": {
                     "runtimeClassName": "wasmtime-wasip2",
-                    "containers": [{"image": "docker.io/k3s-wasm/xray-wasm-cli:v0.5.0"}]
+                    "containers": [{"image": "docker.io/k3s-wasm/xray-wasm-cli:v0.6.0"}]
                 }}
             },
             "status": {"readyReplicas": 1}

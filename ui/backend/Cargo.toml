@@ -1,6 +1,6 @@
 [package]
 name = "k3s-wasm-ui"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 license = "MIT"
 description = "k3s WASM 控制台后端：编译为 wasm32-wasip2 的 wasi:http/proxy 组件"
